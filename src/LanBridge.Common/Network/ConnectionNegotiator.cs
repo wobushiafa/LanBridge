@@ -274,11 +274,58 @@ public sealed class ConnectionNegotiator : IDisposable
 
         if (_publicEndPoint == null && _publicEndPointV6 == null)
         {
-            OnStatusChanged?.Invoke($"STUN unavailable (both v4/v6), continuing with relay fallback: {result.Reason}");
+            OnStatusChanged?.Invoke("Configured STUN server is unavailable. Attempting fallback to public Google STUN server (stun.l.google.com:19302)...");
+            try
+            {
+                var fallbackResult = await StunClient.QueryAsync(holePuncher, "stun.l.google.com", 19302, timeoutMs: 2500);
+                _publicEndPoint = fallbackResult.PublicEndPoint;
+                _natDetection = new NatDetectionResult(
+                    StunNatType.Unknown,
+                    "NAT classified via Google STUN fallback",
+                    _publicEndPoint,
+                    null,
+                    fallbackResult.PublicEndPoint.Port == (holePuncher.LocalEndPoint?.Port ?? 0));
+                
+                var mapping = _natDetection.PortPreserved ? "port-preserved" : "port-mapped";
+                OnStatusChanged?.Invoke($"Public endpoint (IPv4) via Google STUN: {_publicEndPoint}");
+                OnStatusChanged?.Invoke($"NAT mapping: {holePuncher.LocalEndPoint} -> {_publicEndPoint} ({mapping})");
+            }
+            catch (Exception fallbackEx)
+            {
+                if (_options.Verbose)
+                {
+                    OnStatusChanged?.Invoke($"IPv4 STUN Fallback to Google failed: {fallbackEx.Message}");
+                }
+            }
+
+            try
+            {
+                _publicEndPointV6 = await StunClient.QueryPublicEndPointV6Async(
+                    holePuncher,
+                    "stun.l.google.com",
+                    19302,
+                    timeoutMs: 2500);
+                if (_publicEndPointV6 != null)
+                {
+                    OnStatusChanged?.Invoke($"IPv6 public endpoint via Google STUN: {_publicEndPointV6}");
+                }
+            }
+            catch (Exception fallbackExV6)
+            {
+                if (_options.Verbose)
+                {
+                    OnStatusChanged?.Invoke($"IPv6 STUN Fallback to Google failed: {fallbackExV6.Message}");
+                }
+            }
+        }
+
+        if (_publicEndPoint == null && _publicEndPointV6 == null)
+        {
+            OnStatusChanged?.Invoke($"STUN unavailable (both v4/v6) after Google STUN fallback, continuing with relay fallback: {result.Reason}");
             return;
         }
 
-        if (_publicEndPoint != null)
+        if (_publicEndPoint != null && result.PublicEndPoint != null)
         {
             var mapping = result.PortPreserved ? "port-preserved" : "port-mapped";
             OnStatusChanged?.Invoke($"Public endpoint (IPv4): {_publicEndPoint}");
