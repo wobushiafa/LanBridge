@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/LanBridge.Common/LanBridge.Common.csproj" />
+    <Project Path="src/LanBridge.ExtranetPeer/LanBridge.ExtranetPeer.csproj" />
+    <Project Path="src/LanBridge.IntranetPeer/LanBridge.IntranetPeer.csproj" />
+    <Project Path="src/LanBridge.SignalingServer/LanBridge.SignalingServer.csproj" />
+  </Folder>
+</Solution>

@@ -1,0 +1,35 @@
+{
+  "nodeId": "extranet-client-001",
+  "signalingServerHost": "lanbridge.example.com",
+  "signalingServerPort": 9000,
+  "stunServerHost": "lanbridge.example.com",
+  "stunServerPort": 9001,
+  "stunAlternateServerPort": 9003,
+  "targetNodeId": "intranet-peer-001",
+  "udpPort": 0,
+  "holePunchTimeoutMs": 10000,
+  "enableRelayFallback": true,
+  "verbose": false,
+  "mappings": [
+    {
+      "localPort": 8554,
+      "targetHost": "192.168.7.230",
+      "targetPort": 554
+    },
+    {
+      "localPort": 18080,
+      "targetHost": "192.168.7.230",
+      "targetPort": 80
+    },
+    {
+      "localPort": 18081,
+      "targetHost": "192.168.7.231",
+      "targetPort": 8080
+    },
+    {
+      "localPort": 18082,
+      "targetHost": "192.168.7.231",
+      "targetPort": 3000
+    }
+  ]
+}

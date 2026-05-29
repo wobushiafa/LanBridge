@@ -1,0 +1,23 @@
+{
+  "nodeId": "intranet-peer-001",
+  "signalingServerHost": "lanbridge.example.com",
+  "signalingServerPort": 9000,
+  "stunServerHost": "lanbridge.example.com",
+  "stunServerPort": 9001,
+  "stunAlternateServerPort": 9003,
+  "targetSourceHost": "192.168.7.230",
+  "targetSourcePort": 554,
+  "udpPort": 0,
+  "verbose": false,
+  "allowedTargets": [
+    {
+      "host": "192.168.7.230",
+      "port": 554
+    }
+  ],
+  "allowedSubnets": [
+    {
+      "cidr": "192.168.7.0/24"
+    }
+  ]
+}

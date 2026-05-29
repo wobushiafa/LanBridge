@@ -1,0 +1,339 @@
+using System.Collections.Concurrent;
+using System.Net;
+using System.Net.Sockets;
+using LanBridge.Common.Network;
+using LanBridge.Common.Protocol;
+
+namespace LanBridge.ExtranetPeer;
+
+public class ClientConfig
+{
+    public string NodeId { get; set; } = "extranet-client-001";
+    public string SignalingServerHost { get; set; } = "127.0.0.1";
+    public int SignalingServerPort { get; set; } = 9000;
+    public string StunServerHost { get; set; } = "127.0.0.1";
+    public int StunServerPort { get; set; } = 9001;
+    public int StunAlternateServerPort { get; set; } = 9003;
+    public string TargetNodeId { get; set; } = "intranet-peer-001";
+    public int LocalProxyPort { get; set; } = 8554;
+    public int UdpPort { get; set; }
+    public int HolePunchTimeoutMs { get; set; } = 10000;
+    public bool EnableRelayFallback { get; set; } = true;
+    public bool Verbose { get; set; }
+    public List<TunnelMapping> Mappings { get; set; } = new();
+}
+
+public class TunnelMapping
+{
+    public int LocalPort { get; set; }
+    public string TargetHost { get; set; } = string.Empty;
+    public int TargetPort { get; set; }
+
+    public string Target => string.IsNullOrWhiteSpace(TargetHost) || TargetPort <= 0
+        ? string.Empty
+        : $"{TargetHost}:{TargetPort}";
+}
+
+public enum ConnectionState
+{
+    Disconnected,
+    Connecting,
+    HolePunching,
+    Connected,
+    RelayMode,
+    Error
+}
+
+public class ExtranetPeer : IDisposable
+{
+    private readonly ClientConfig _config;
+    private readonly ConnectionNegotiator _connection;
+    private readonly List<TcpListener> _localProxies = new();
+    private readonly ConcurrentDictionary<uint, TcpClient> _localClients = new();
+    private readonly CancellationTokenSource _cts = new();
+    private bool _isRunning;
+    private ConnectionState _state = ConnectionState.Disconnected;
+
+    public event Action<string>? OnStatusChanged;
+    public event Action<byte[], int>? OnDataReceived;
+
+    public ConnectionState State => _state;
+    public bool IsConnected => _connection.IsConnected;
+
+    public ExtranetPeer(ClientConfig config)
+    {
+        _config = config;
+        if (_config.Mappings.Count == 0)
+        {
+            _config.Mappings.Add(new TunnelMapping { LocalPort = _config.LocalProxyPort });
+        }
+
+        _connection = new ConnectionNegotiator(new PeerConnectionOptions
+        {
+            Role = PeerConnectionRole.Extranet,
+            NodeId = _config.NodeId,
+            SignalingServerHost = _config.SignalingServerHost,
+            SignalingServerPort = _config.SignalingServerPort,
+            StunServerHost = _config.StunServerHost,
+            StunServerPort = _config.StunServerPort,
+            StunAlternateServerPort = _config.StunAlternateServerPort,
+            TargetNodeId = _config.TargetNodeId,
+            UdpPort = _config.UdpPort,
+            HolePunchTimeoutMs = _config.HolePunchTimeoutMs,
+            EnableRelayFallback = _config.EnableRelayFallback,
+            Verbose = _config.Verbose
+        });
+        _connection.OnStatusChanged += HandleConnectionStatus;
+        _connection.OnModeChanged += HandleTransportModeChanged;
+        _connection.OnSignalingDisconnected += () => UpdateState(ConnectionState.Disconnected);
+        _connection.OnDataReceived += HandleTunnelData;
+    }
+
+    public async Task StartAsync()
+    {
+        _isRunning = true;
+        UpdateState(ConnectionState.Connecting);
+
+        try
+        {
+            await _connection.StartAsync();
+            await StartLocalProxyAsync();
+
+            while (_isRunning)
+            {
+                await Task.Delay(1000, _cts.Token);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception ex)
+        {
+            UpdateState(ConnectionState.Error);
+            OnStatusChanged?.Invoke($"Error: {ex.Message}");
+            throw;
+        }
+    }
+
+    private void HandleConnectionStatus(string status)
+    {
+        if (status.StartsWith("State: HolePunching", StringComparison.OrdinalIgnoreCase))
+        {
+            UpdateState(ConnectionState.HolePunching);
+            return;
+        }
+
+        OnStatusChanged?.Invoke(status);
+    }
+
+    private void HandleTransportModeChanged(PeerTransportMode mode)
+    {
+        switch (mode)
+        {
+            case PeerTransportMode.P2pDirect:
+                UpdateState(ConnectionState.Connected);
+                break;
+            case PeerTransportMode.Relay:
+                UpdateState(ConnectionState.RelayMode);
+                break;
+            case PeerTransportMode.None:
+                if (_state != ConnectionState.Connecting)
+                {
+                    UpdateState(ConnectionState.Disconnected);
+                }
+                break;
+        }
+    }
+
+    private async Task StartLocalProxyAsync()
+    {
+        foreach (var mapping in _config.Mappings)
+        {
+            try
+            {
+                var listener = new TcpListener(IPAddress.Loopback, mapping.LocalPort);
+                listener.Start();
+                _localProxies.Add(listener);
+                OnStatusChanged?.Invoke($"Local proxy started on 127.0.0.1:{mapping.LocalPort}" +
+                                        (string.IsNullOrWhiteSpace(mapping.Target) ? " -> intranet default target" : $" -> {mapping.Target}"));
+                _ = Task.Run(() => AcceptLocalClientsAsync(listener, mapping));
+            }
+            catch (SocketException ex) when (mapping.LocalPort == 1554)
+            {
+                OnStatusChanged?.Invoke($"Local proxy port 1554 unavailable ({ex.Message}); retrying on 8554");
+                mapping.LocalPort = 8554;
+                var listener = new TcpListener(IPAddress.Loopback, mapping.LocalPort);
+                listener.Start();
+                _localProxies.Add(listener);
+                OnStatusChanged?.Invoke($"Local proxy started on 127.0.0.1:{mapping.LocalPort}");
+                _ = Task.Run(() => AcceptLocalClientsAsync(listener, mapping));
+            }
+        }
+    }
+
+    private async Task AcceptLocalClientsAsync(TcpListener listener, TunnelMapping mapping)
+    {
+        while (_isRunning)
+        {
+            try
+            {
+                var client = await listener.AcceptTcpClientAsync();
+                var streamId = NextStreamId();
+
+                _localClients[streamId] = client;
+                OnStatusChanged?.Invoke($"Local client connected: stream {streamId}");
+
+                _ = Task.Run(() => HandleLocalClientAsync(streamId, client, mapping));
+            }
+            catch (Exception) when (!_isRunning)
+            {
+                break;
+            }
+            catch (Exception ex)
+            {
+                OnStatusChanged?.Invoke($"Accept error: {ex.Message}");
+            }
+        }
+    }
+
+    private async Task HandleLocalClientAsync(uint streamId, TcpClient client, TunnelMapping mapping)
+    {
+        var buffer = new byte[65536];
+
+        try
+        {
+            var stream = client.GetStream();
+            if (!await _connection.EnsureConnectedAsync(TimeSpan.FromSeconds(15), _cts.Token))
+            {
+                OnStatusChanged?.Invoke($"Local client stream {streamId} closed: remote session not ready");
+                return;
+            }
+
+            await SendTunnelFrameToRemoteAsync(TunnelFrame.Open(streamId, mapping.Target));
+
+            while (client.Connected && _isRunning)
+            {
+                var bytesRead = await stream.ReadAsync(buffer, 0, buffer.Length, _cts.Token);
+                if (bytesRead == 0)
+                {
+                    break;
+                }
+
+                await SendTunnelFrameToRemoteAsync(TunnelFrame.Data(streamId, buffer, 0, bytesRead));
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception ex)
+        {
+            OnStatusChanged?.Invoke($"Local client stream {streamId} error: {ex.Message}");
+        }
+        finally
+        {
+            _localClients.TryRemove(streamId, out _);
+            client.Dispose();
+            OnStatusChanged?.Invoke($"Local client disconnected: stream {streamId}");
+            await CloseRemoteTargetAsync(streamId);
+        }
+    }
+
+    private async Task CloseRemoteTargetAsync(uint streamId)
+    {
+        try
+        {
+            await SendTunnelFrameToRemoteAsync(TunnelFrame.Close(streamId));
+            OnStatusChanged?.Invoke($"Requested remote target close for stream {streamId}");
+        }
+        catch (Exception ex)
+        {
+            OnStatusChanged?.Invoke($"Remote target close request failed: {ex.Message}");
+        }
+    }
+
+    private static uint NextStreamId()
+    {
+        Span<byte> bytes = stackalloc byte[4];
+        Random.Shared.NextBytes(bytes);
+        var streamId = BitConverter.ToUInt32(bytes);
+        return streamId == 0 ? 1 : streamId;
+    }
+
+    private void HandleTunnelData(byte[] data, int length)
+    {
+        if (!TunnelFrame.TryDecode(data, length, out var frame))
+        {
+            OnStatusChanged?.Invoke($"Invalid tunnel frame from remote: {length} bytes");
+            return;
+        }
+
+        if (frame.Type == TunnelFrameType.Data &&
+            _localClients.TryGetValue(frame.StreamId, out var client) &&
+            client.Connected)
+        {
+            try
+            {
+                var stream = client.GetStream();
+                stream.Write(frame.Payload, 0, frame.Payload.Length);
+                stream.Flush();
+                OnDataReceived?.Invoke(frame.Payload, frame.Payload.Length);
+            }
+            catch (Exception ex)
+            {
+                OnStatusChanged?.Invoke($"Write to local stream {frame.StreamId} error: {ex.Message}");
+            }
+        }
+        else if (frame.Type == TunnelFrameType.Close)
+        {
+            if (_localClients.TryRemove(frame.StreamId, out var closeClient))
+            {
+                closeClient.Dispose();
+            }
+        }
+        else if (frame.Type == TunnelFrameType.Error)
+        {
+            OnStatusChanged?.Invoke($"Remote stream {frame.StreamId} error: {frame.PayloadAsString()}");
+            if (_localClients.TryRemove(frame.StreamId, out var errorClient))
+            {
+                errorClient.Dispose();
+            }
+        }
+    }
+
+    private async Task SendTunnelFrameToRemoteAsync(TunnelFrame frame)
+    {
+        var bytes = frame.Encode();
+        await SendToRemoteAsync(bytes, 0, bytes.Length);
+    }
+
+    public async Task SendToRemoteAsync(byte[] data, int offset, int length)
+    {
+        await _connection.SendAsync(data, offset, length);
+    }
+
+    private void UpdateState(ConnectionState newState)
+    {
+        _state = newState;
+        OnStatusChanged?.Invoke($"State: {newState}");
+    }
+
+    public void Dispose()
+    {
+        _isRunning = false;
+        _cts.Cancel();
+        _cts.Dispose();
+        _connection.Dispose();
+
+        foreach (var proxy in _localProxies)
+        {
+            proxy.Stop();
+        }
+
+        foreach (var client in _localClients.Values)
+        {
+            client.Dispose();
+        }
+
+        _localClients.Clear();
+    }
+}
