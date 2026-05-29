@@ -44,6 +44,7 @@ public sealed class ConnectionNegotiator : IDisposable
     private bool _isHolePunching;
     private string _activeSessionId = "default";
     private DateTime _lastConnectionRequestUtc = DateTime.MinValue;
+    private readonly CancellationTokenSource _cts = new();
 
     public event Action<string>? OnStatusChanged;
     public event Action<byte[], int>? OnDataReceived;
@@ -75,11 +76,65 @@ public sealed class ConnectionNegotiator : IDisposable
         {
             await RegisterNodeAsync();
             OnStatusChanged?.Invoke("Ready");
+            StartNatKeepAliveLoop();
         }
         else
         {
             await RequestConnectionAsync(force: true);
         }
+    }
+
+    private void StartNatKeepAliveLoop()
+    {
+        if (_options.Role != PeerConnectionRole.Intranet)
+        {
+            return;
+        }
+
+        _ = Task.Run(async () =>
+        {
+            using var timer = new PeriodicTimer(TimeSpan.FromSeconds(25));
+            while (await timer.WaitForNextTickAsync(_cts.Token))
+            {
+                if (_cts.IsCancellationRequested)
+                {
+                    break;
+                }
+
+                if (!IsSignalingConnected)
+                {
+                    continue;
+                }
+
+                if (IsConnected || _isHolePunching)
+                {
+                    continue;
+                }
+
+                try
+                {
+                    var result = await StunClient.QueryAsync(
+                        _holePuncher!,
+                        _options.StunServerHost,
+                        _options.StunServerPort,
+                        timeoutMs: 2000);
+                        
+                    if (result.PublicEndPoint != null && !result.PublicEndPoint.Equals(_publicEndPoint))
+                    {
+                        OnStatusChanged?.Invoke($"NAT mapping changed from {_publicEndPoint} to {result.PublicEndPoint}. Re-registering...");
+                        _publicEndPoint = result.PublicEndPoint;
+                        await RegisterNodeAsync();
+                    }
+                }
+                catch (Exception ex)
+                {
+                    if (_options.Verbose)
+                    {
+                        OnStatusChanged?.Invoke($"NAT keep-alive failed: {ex.Message}");
+                    }
+                }
+            }
+        }, _cts.Token);
     }
 
     public async Task<bool> EnsureConnectedAsync(TimeSpan timeout, CancellationToken cancellationToken)
@@ -323,7 +378,7 @@ public sealed class ConnectionNegotiator : IDisposable
         }
 
         _isHolePunching = true;
-        _pendingPunches[targetEndPoint.ToString()] = new PendingPunch(sessionId, conv);
+        _pendingPunches[targetEndPoint.Address.ToString()] = new PendingPunch(sessionId, conv);
         OnModeChanged?.Invoke(PeerTransportMode.None);
         OnStatusChanged?.Invoke("State: HolePunching");
 
@@ -351,7 +406,7 @@ public sealed class ConnectionNegotiator : IDisposable
             OnStatusChanged?.Invoke($"Hole punched to {endpoint}");
             _isHolePunching = false;
 
-            if (!_pendingPunches.TryRemove(endpoint.ToString(), out var pending))
+            if (!_pendingPunches.TryRemove(endpoint.Address.ToString(), out var pending))
             {
                 OnStatusChanged?.Invoke($"Hole punched endpoint has no pending session: {endpoint}");
                 return;
@@ -499,6 +554,8 @@ public sealed class ConnectionNegotiator : IDisposable
 
     public void Dispose()
     {
+        try { _cts.Cancel(); } catch { }
+        try { _cts.Dispose(); } catch { }
         _connectionRequestLock.Dispose();
         _relayProbeCts?.Cancel();
         _relayProbeCts?.Dispose();
