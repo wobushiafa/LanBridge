@@ -1,155 +1,182 @@
-# LanBridge
+# ⚡ LanBridge: 高性能 P2P 局域网穿透隧道工具
 
-LanBridge 是一个面向局域网服务访问的 P2P TCP 隧道工具。它让外网设备通过本地端口访问内网端所在局域网里的 TCP 服务，例如 RTSP 摄像头、HTTP 服务、WebSocket 服务、NAS Web 面板等。
+<p align="center">
+  <a href="#-特性"><strong>特性</strong></a> |
+  <a href="#-系统架构"><strong>系统架构</strong></a> |
+  <a href="#-快速开始"><strong>快速开始</strong></a> |
+  <a href="#-配置文件示例"><strong>配置指南</strong></a> |
+  <a href="#-传输模式与性能性能调优"><strong>性能调优</strong></a> |
+  <a href="#-访问控制与安全"><strong>访问控制</strong></a>
+</p>
 
-LanBridge 会优先尝试 P2P 直连；如果 NAT 条件不允许直连，会自动回退到 Relay 中继链路。
+---
 
-## 特性
+**LanBridge** 是一个基于 **.NET 10** 构建的高性能、极轻量的内网穿透隧道工具。它支持标准 **STUN 协议 (RFC 5389)** 以及 **双向 UDP / TCP 端口转发**，能让您在公网环境下安全、流畅地访问位于内网局域网中的任意服务（例如：RTSP 监控流、HTTP 服务、WebSocket、UDP 游戏服务器、DNS 等）。
 
-- P2P 优先，Relay 自动后备
-- 支持标准 STUN Binding 请求
-- 支持 NAT 类型诊断
-- 支持 KCP 可靠传输
-- 支持多个外网端同时连接一个内网端
-- 支持一个内网端暴露多台局域网设备
-- 支持一个外网端同时映射多路 TCP 服务
-- 支持 HTTP、WebSocket、RTSP over TCP 等任意 TCP 协议
-- 支持按目标 IP、端口、CIDR 网段配置访问白名单
+项目核心采用 **KCP 可靠 UDP 传输层** 并辅以高度的内存零分配（Zero-Allocation Buffer Pooling）与状态锁设计，确保极高吞吐量的同时，消除了高并发下的 GC 垃圾回收卡顿。
 
-## 架构
+---
+
+## ✨ 核心特性
+
+- 🌐 **双协议端口转发**：不仅支持经典的 TCP（HTTP、RTSP over TCP、WebSocket、SSH），还完美支持 **UDP 端口转发**（RTSP UDP、游戏服务器、DNS 等），并且配有智能连接老化清理（Idle Timeout Pruning）防泄露机制。
+- ⚡ **KCP 高吞吐传输**：针对高带宽、高延迟网络调整了 KCP 滑动窗口与段队列大小（默认增至 **1024 窗口**），在恶劣网络下依然能够维持极佳的链路吞吐量。
+- 🧊 **零分配级内存优化**：传输载荷的字节缓冲区完全采用 `System.Buffers.ArrayPool<byte>.Shared` 线程安全对象池，杜绝堆内存碎片与 GC 停顿，保障高吞吐下的平稳运行。
+- 🎯 **标准 STUN RFC 5389**：集成原生无外部依赖的标准 STUN 解析，消除 CPU 字节序架构依赖性，完美支持标准 STUN 公网服务器和 NAT 诊断功能。
+- 🤝 **首包零丢失竞态防护**：使用 Task 驱动的异步状态同步结构保护内网目标连接，彻底消除 UDP/KCP 穿透初期的异步数据包到达竞争，实现首包 100% 成功交付。
+- 🔗 **P2P 优先与自动中继后备**：优先尝试打洞建立 P2P UDP 直连；在 NAT 条件极差（如双侧对称 NAT）时，秒级无缝降级到 **Relay 中继模式**。
+
+---
+
+## 🏗️ 系统架构
 
 ```mermaid
-flowchart LR
-    Extranet["LanBridge.ExtranetPeer<br/>外网端"] -->|Signaling| Server["LanBridge.SignalingServer<br/>信令/STUN/Relay"]
-    Intranet["LanBridge.IntranetPeer<br/>内网端"] -->|Signaling| Server
-    Extranet -. "P2P UDP + KCP 优先" .-> Intranet
-    Extranet -->|Relay fallback| Server --> Intranet
-    Intranet --> LAN["LAN TCP Services<br/>RTSP / HTTP / WS"]
+flowchart TB
+    subgraph Extranet [外网客户端 (ExtranetPeer)]
+        LocalTCP["TCP 代理监听器"]
+        LocalUDP["UDP 代理监听器"]
+        ExtSession["会话流分发器 (StreamId)"]
+    end
+
+    subgraph Internet [公网基础设施]
+        Server["LanBridge.SignalingServer<br/>(信令 / STUN / Relay 中继)"]
+    end
+
+    subgraph Intranet [内网端 (IntranetPeer)]
+        IntSession["并发状态管理器<br/>(Task-based Dict)"]
+        TargetRouter["双向转发模块"]
+    end
+
+    subgraph LAN [内网局域网设备]
+        HTTP["HTTP (80/8080)"]
+        RTSP["RTSP/RTP Stream"]
+        Game["UDP 游戏服务器"]
+    end
+
+    %% 信令连接
+    LocalTCP --> ExtSession
+    LocalUDP --> ExtSession
+    Extranet -->|双向信令交互| Server
+    Intranet -->|双向信令注册| Server
+
+    %% 穿透与回退链路
+    Extranet -.->|⚡ P2P UDP 直连打洞 (KCP 1024 窗口)| Intranet
+    Extranet ===>|🛡️ Relay Fallback 极速中继| Server ===> Intranet
+
+    %% 局域网分发
+    Intranet --> TargetRouter
+    TargetRouter -->|TCP 转发| HTTP
+    TargetRouter -->|TCP / UDP 转发| RTSP
+    TargetRouter -->|UDP 转发| Game
+
+    classDef peer fill:#1e293b,stroke:#3b82f6,stroke-width:2px,color:#f8fafc;
+    classDef server fill:#1e1b4b,stroke:#818cf8,stroke-width:2px,color:#f8fafc;
+    classDef lan fill:#022c22,stroke:#10b981,stroke-width:2px,color:#f8fafc;
+    class Extranet,Intranet peer;
+    class Server server;
+    class HTTP,RTSP,Game lan;
 ```
 
-## 项目结构
+---
+
+## 📂 项目结构
 
 ```text
-src/
-  LanBridge.Common/           公共协议、STUN、KCP、传输层
-  LanBridge.SignalingServer/  信令服务、STUN 服务、Relay 服务
-  LanBridge.IntranetPeer/     内网端，连接局域网目标服务
-  LanBridge.ExtranetPeer/     外网端，本地 TCP 代理入口
-examples/
-  server.config.json
-  intranet.config.json
-  extranet.config.json
+LanBridge/
+├── src/
+│   ├── LanBridge.Common/           # 核心公共库：STUN协议实现、KCP传输层优化、安全帧定义
+│   ├── LanBridge.SignalingServer/  # 公网服务端：信令握手、NAT分类诊断、UDP中转中继服务
+│   ├── LanBridge.IntranetPeer/     # 内网穿透客户端：并发白名单访问控制、TCP/UDP双向连接池
+│   └── LanBridge.ExtranetPeer/     # 外网访问客户端：本地TCP/UDP端口监听与虚会话代理
+└── examples/                       # 标准生产配置模板 (TCP & UDP 样例)
 ```
 
-## 快速开始
+---
 
-### 1. 启动服务端
+## 🚀 快速开始
 
-服务端需要有公网可访问地址，并开放：
+### 1. 部署公网服务端
 
-- TCP `9000`：信令
-- UDP `9001`：STUN
-- TCP `9002`：Relay
-- UDP `9003`：备用 STUN，用于 NAT 诊断
+服务端需要部署在拥有公网 IP 的服务器上，并默认监听或放行以下端口：
+* **TCP `9000`**：信令服务端口
+* **UDP `9001`**：标准 STUN 服务端口
+* **TCP `9002`**：Relay 数据中转端口
+* **UDP `9003`**：辅助 STUN 服务端口（用于高精度 NAT 分类与诊断）
 
-```powershell
-dotnet LanBridge.SignalingServer.dll
+```bash
+# 直接运行启动
+dotnet run --project src/LanBridge.SignalingServer
+
+# 或加载自定义配置文件
+dotnet run --project src/LanBridge.SignalingServer -- -c server.config.json
 ```
 
-或使用配置文件：
+---
 
-```powershell
-LanBridge.SignalingServer.exe -c .\server.config.json
+### 2. 启动内网代理端 (IntranetPeer)
+
+在内网端，根据安全要求可以指定特定的局域网段白名单。例如，允许外网客户端访问 `192.168.7.0/24` 网段内的任意 TCP 及 UDP 服务：
+
+```bash
+dotnet run --project src/LanBridge.IntranetPeer -- \
+  --signaling-host lanbridge.yourdomain.com \
+  --stun-host lanbridge.yourdomain.com \
+  --allow-subnet 192.168.7.0/24
 ```
 
-### 2. 启动内网端
+> [!TIP]
+> 也可以通过指定多个 `--allow-target 192.168.7.230:554` 来进行极细粒度的端口安全隔离限制。
 
-允许外网端访问 `192.168.7.0/24` 网段内的任意 TCP 端口：
+---
 
-```powershell
-LanBridge.IntranetPeer.exe -sh lanbridge.example.com -sth lanbridge.example.com -th 192.168.7.230 -tp 554 --allow-subnet 192.168.7.0/24
+### 3. 启动外网访问客户端 (ExtranetPeer)
+
+使用强大的 `-m` / `--map` 标志支持跨协议配置（格式：`localPort=targetHost:targetPort[:protocol]`）。
+如果未指定可选的协议后缀，将默认作为 `tcp` 代理运行。
+
+```bash
+dotnet run --project src/LanBridge.ExtranetPeer -- \
+  --signaling-host lanbridge.yourdomain.com \
+  --stun-host lanbridge.yourdomain.com \
+  --target-node intranet-peer-001 \
+  -m 8554=192.168.7.230:554:tcp \
+  -m 18080=192.168.7.230:80:tcp \
+  -m 9999=192.168.7.230:9999:udp \
+  -m 53=8.8.8.8:53:udp
 ```
 
-也可以使用配置文件：
+启动后，您可直接在本机对外网端暴露的代理端口发起请求：
+* 访问内网 RTSP 视频流：`rtsp://127.0.0.1:8554/live`
+* 访问内网 Web 页面：`http://127.0.0.1:18080`
+* 访问内网 UDP Echo 或 游戏服务：发往 `127.0.0.1:9999` (UDP)
+* 访问穿透的 DNS 解析服务：发往 `127.0.0.1:53` (UDP)
 
-```powershell
-LanBridge.IntranetPeer.exe -c .\intranet.config.json
-```
+---
 
-### 3. 启动外网端
+## ⚙️ 配置文件示例
 
-通过多条 `--map` 把本地端口映射到内网端可访问的局域网服务：
+为了更加规范和优雅地进行管理，推荐在生产环境使用 JSON 配置文件。
 
-```powershell
-LanBridge.ExtranetPeer.exe -sh lanbridge.example.com -sth lanbridge.example.com -tn intranet-peer-001 `
-  -m 8554=192.168.7.230:554 `
-  -m 18080=192.168.7.230:80 `
-  -m 18081=192.168.7.231:8080 `
-  -m 18082=192.168.7.231:3000
-```
-
-也可以使用配置文件：
-
-```powershell
-LanBridge.ExtranetPeer.exe -c .\extranet.config.json
-```
-
-然后从外网端本机访问：
-
-- RTSP：`rtsp://127.0.0.1:8554/...`
-- HTTP：`http://127.0.0.1:18080`
-- WebSocket：`ws://127.0.0.1:18081`
-
-## 访问控制
-
-内网端默认只允许访问 `--target-host` + `--target-port` 指定的目标。要暴露更多局域网服务，需要显式配置白名单。
-
-允许单个目标和任意端口：
-
-```powershell
---allow-target 192.168.7.230
-```
-
-允许单个目标和指定端口：
-
-```powershell
---allow-target 192.168.7.230:554
-```
-
-允许一个网段的任意 TCP 端口：
-
-```powershell
---allow-subnet 192.168.7.0/24
-```
-
-允许一个网段的指定端口：
-
-```powershell
---allow-subnet 192.168.7.0/24:554
-```
-
-也支持显式通配端口：
-
-```powershell
---allow-subnet 192.168.7.0/24:*
-```
-
-## 配置文件示例
-
-### 内网端
+### 内网端配置文件 (`intranet.config.json`)
 
 ```json
 {
   "nodeId": "intranet-peer-001",
-  "signalingServerHost": "lanbridge.example.com",
+  "signalingServerHost": "lanbridge.yourdomain.com",
   "signalingServerPort": 9000,
-  "stunServerHost": "lanbridge.example.com",
+  "stunServerHost": "lanbridge.yourdomain.com",
   "stunServerPort": 9001,
   "stunAlternateServerPort": 9003,
   "targetSourceHost": "192.168.7.230",
   "targetSourcePort": 554,
   "udpPort": 0,
   "verbose": false,
+  "allowedTargets": [
+    {
+      "host": "192.168.7.230",
+      "port": 554
+    }
+  ],
   "allowedSubnets": [
     {
       "cidr": "192.168.7.0/24"
@@ -158,14 +185,14 @@ LanBridge.ExtranetPeer.exe -c .\extranet.config.json
 }
 ```
 
-### 外网端
+### 外网端配置文件 (`extranet.config.json`)
 
 ```json
 {
   "nodeId": "extranet-client-001",
-  "signalingServerHost": "lanbridge.example.com",
+  "signalingServerHost": "lanbridge.yourdomain.com",
   "signalingServerPort": 9000,
-  "stunServerHost": "lanbridge.example.com",
+  "stunServerHost": "lanbridge.yourdomain.com",
   "stunServerPort": 9001,
   "stunAlternateServerPort": 9003,
   "targetNodeId": "intranet-peer-001",
@@ -177,92 +204,58 @@ LanBridge.ExtranetPeer.exe -c .\extranet.config.json
     {
       "localPort": 8554,
       "targetHost": "192.168.7.230",
-      "targetPort": 554
+      "targetPort": 554,
+      "protocol": "tcp"
     },
     {
       "localPort": 18080,
       "targetHost": "192.168.7.230",
-      "targetPort": 80
+      "targetPort": 80,
+      "protocol": "tcp"
+    },
+    {
+      "localPort": 9999,
+      "targetHost": "192.168.7.230",
+      "targetPort": 9999,
+      "protocol": "udp"
     }
   ]
 }
 ```
 
-## 构建
+---
 
-```powershell
-dotnet build .\LanBridge.slnx -c Release
+## 🛠️ 构建与编译
+
+项目基于全新的 .NET CLI 编译标准，请确保您的环境中安装了 **.NET 10 SDK**：
+
+```bash
+# 全局编译 Release 版本
+dotnet build LanBridge.slnx -c Release
+
+# 独立生成各组件模块
+dotnet publish src/LanBridge.SignalingServer/LanBridge.SignalingServer.csproj -c Release -o ./publish/SignalingServer
+dotnet publish src/LanBridge.IntranetPeer/LanBridge.IntranetPeer.csproj -c Release -o ./publish/IntranetPeer
+dotnet publish src/LanBridge.ExtranetPeer/LanBridge.ExtranetPeer.csproj -c Release -o ./publish/ExtranetPeer
 ```
 
-## 发布
+---
 
-```powershell
-dotnet publish .\src\LanBridge.SignalingServer\LanBridge.SignalingServer.csproj -c Release -o .\publish\LanBridge.SignalingServer
-dotnet publish .\src\LanBridge.IntranetPeer\LanBridge.IntranetPeer.csproj -c Release -o .\publish\LanBridge.IntranetPeer
-dotnet publish .\src\LanBridge.ExtranetPeer\LanBridge.ExtranetPeer.csproj -c Release -o .\publish\LanBridge.ExtranetPeer
-```
+## 📈 传输模式与性能性能调优
 
-## 传输模式
+在打洞测试过程中，LanBridge 终端控制台会醒目显示当前通道模式：
+* 🟢 `TRANSPORT MODE: P2P DIRECT` (低延迟，高带宽，直连免服务器中转)
+* 🟡 `TRANSPORT MODE: RELAY MODE` (服务器中转，安全备用)
 
-运行时控制台会醒目显示当前链路：
+### KCP 的极限吞吐参数优化
+为高带宽、高延迟的长距离链路环境调整了传输层窗口：
+- 默认 KCP 窗口被调优至 **1024 帧（原默认 128）**，大大提升了在高带宽延迟积 (BDP) 网络下的吞吐率。
+- 启用了全套基于 **对象池** 封装的防 GC 处理，能够从源头减小内存压力并确保低时延。
 
-```text
-TRANSPORT MODE: P2P DIRECT
-```
+---
 
-或：
+## 🔒 安全建议
 
-```text
-TRANSPORT MODE: RELAY MODE
-```
-
-P2P 直连失败时，LanBridge 会输出 NAT 诊断信息，并在启用 Relay 的情况下自动回退到中继。
-
-## 支持的协议
-
-LanBridge 转发的是 TCP 字节流，因此理论上支持任意基于 TCP 的应用协议：
-
-- HTTP
-- HTTPS
-- WebSocket
-- RTSP over TCP
-- SSH
-- MQTT
-- 数据库 TCP 连接
-- 自定义 TCP 协议
-
-暂不支持：
-
-- UDP
-- ICMP
-- 组播/广播
-- 需要额外动态连接但未配置映射的协议
-- RTSP UDP 媒体流
-
-如果使用 RTSP，建议在播放器里强制使用 TCP 传输。
-
-## 安全建议
-
-- 不要把 `0.0.0.0/0` 之类的全网段加入内网端白名单
-- 只开放确实需要访问的局域网网段
-- 服务端端口建议配合云防火墙限制来源
-- 生产环境应使用更强的 token、鉴权和传输加密
-- Relay 会经过服务端转发流量，注意带宽和日志留存
-
-## 常见问题
-
-### 为什么有时不是 P2P？
-
-如果任一侧处于对称 NAT、运营商级 NAT 或 UDP 被限制，P2P 打洞可能失败。LanBridge 会自动尝试 Relay 后备链路。
-
-### HTTP 和 WebSocket 能不能用？
-
-可以。外网端把本地端口映射到内网服务端口即可，例如 `18080=192.168.7.230:80`，然后访问 `http://127.0.0.1:18080`。
-
-### 多个外网端能不能同时访问？
-
-可以。每个外网端会建立独立会话，内网端按会话和流 ID 隔离转发。
-
-### 一个外网端能不能同时访问多路服务？
-
-可以。使用多个 `--map`，或者在 `extranet.config.json` 里配置多个 `mappings`。
+1. **白名单最小范围化原则**：严禁在生产环境加入 `0.0.0.0/0` 网段白名单。请务必将 `allowedSubnets` 限制在具体、已知的局域网段。
+2. **多租户隔离**：多台外网端（ExtranetPeer）可连接同一个内网端。内网端支持通过会话 ID 独立隔离客户端会话。
+3. **敏感网络端口安全**：如果您需要转发 SSH、数据库等敏感服务，建议在安全组或控制台层面增加更强的传输前置控制或加密隧道。
