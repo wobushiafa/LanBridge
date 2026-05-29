@@ -16,6 +16,7 @@ public class UdpHolePuncher : IDisposable
     private IPEndPoint? _remoteEndPoint;
     private readonly ConcurrentDictionary<string, byte> _punchedEndpoints = new();
     private readonly ConcurrentDictionary<uint, KcpSession> _kcpSessions = new();
+    private readonly ConcurrentDictionary<string, TaskCompletionSource<byte[]>> _pendingStunRequests = new();
     private CancellationTokenSource _cts;
     private Task? _receivePumpTask;
     
@@ -31,6 +32,18 @@ public class UdpHolePuncher : IDisposable
         _udpClient = new UdpClient(port);
         _localId = localId;
         _cts = new CancellationTokenSource();
+    }
+
+    public void RegisterStunRequest(byte[] transactionId, TaskCompletionSource<byte[]> tcs)
+    {
+        var key = Convert.ToHexString(transactionId);
+        _pendingStunRequests[key] = tcs;
+    }
+
+    public void UnregisterStunRequest(byte[] transactionId)
+    {
+        var key = Convert.ToHexString(transactionId);
+        _pendingStunRequests.TryRemove(key, out _);
     }
     
     /// <summary>
@@ -105,6 +118,10 @@ public class UdpHolePuncher : IDisposable
             try
             {
                 var result = await _udpClient.ReceiveAsync(_cts.Token);
+                if (TryDispatchStun(result))
+                {
+                    continue;
+                }
                 if (TryDispatchKcp(result))
                 {
                     continue;
@@ -121,6 +138,25 @@ public class UdpHolePuncher : IDisposable
                 OnError?.Invoke($"UDP receive pump error: {ex.Message}");
             }
         }
+    }
+
+    private bool TryDispatchStun(UdpReceiveResult result)
+    {
+        if (result.Buffer.Length >= 20)
+        {
+            var magicCookie = System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(result.Buffer.AsSpan(4, 4));
+            if (magicCookie == 0x2112A442)
+            {
+                var transactionId = result.Buffer.AsSpan(8, 12).ToArray();
+                var key = Convert.ToHexString(transactionId);
+                if (_pendingStunRequests.TryGetValue(key, out var tcs))
+                {
+                    tcs.TrySetResult(result.Buffer);
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     private bool TryDispatchKcp(UdpReceiveResult result)

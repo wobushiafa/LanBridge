@@ -18,32 +18,36 @@ public static class StunClient
         var serverEndPoint = await ResolveServerAsync(host, port);
         var transactionId = Guid.NewGuid().ToByteArray().AsSpan(0, 12).ToArray();
         var request = StunProtocol.CreateBindingRequest(changePort: changePort, transactionId: transactionId);
-        await socket.SendAsync(request, request.Length, serverEndPoint);
 
-        using var timeout = new CancellationTokenSource(timeoutMs);
-        while (!timeout.IsCancellationRequested)
+        var tcs = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
+        socket.RegisterStunRequest(transactionId, tcs);
+
+        try
         {
-            try
+            socket.StartReceivePump();
+            await socket.SendAsync(request, request.Length, serverEndPoint);
+
+            using var cts = new CancellationTokenSource(timeoutMs);
+            using (cts.Token.Register(() => tcs.TrySetCanceled()))
             {
-                var result = await socket.ReceiveAsync(timeout.Token);
-                if (StunProtocol.TryParseBindingSuccessResponse(result.Buffer, transactionId, out var mappedEndPoint) &&
+                var responseBuffer = await tcs.Task;
+                if (StunProtocol.TryParseBindingSuccessResponse(responseBuffer, transactionId, out var mappedEndPoint) &&
                     mappedEndPoint != null)
                 {
-                    return new StunBindingResult(mappedEndPoint, result.RemoteEndPoint, StandardProtocol: true);
+                    return new StunBindingResult(mappedEndPoint, serverEndPoint, StandardProtocol: true);
                 }
             }
-            catch (OperationCanceledException)
-            {
-                break;
-            }
         }
-
-        if (changePort)
+        catch (OperationCanceledException)
         {
-            throw new TimeoutException("standard STUN change-port test timeout");
+            throw new TimeoutException($"STUN query to {host}:{port} timed out after {timeoutMs}ms");
+        }
+        finally
+        {
+            socket.UnregisterStunRequest(transactionId);
         }
 
-        return await QueryLegacyAsync(socket, serverEndPoint, timeoutMs);
+        throw new Exception($"Failed to parse STUN response from {host}:{port}");
     }
 
     public static async Task<NatDetectionResult> DetectNatAsync(
@@ -120,61 +124,6 @@ public static class StunClient
                 alternate.PublicEndPoint,
                 portPreserved);
         }
-    }
-
-    private static async Task<StunBindingResult> QueryLegacyAsync(UdpHolePuncher socket, IPEndPoint serverEndPoint, int timeoutMs)
-    {
-        var request = Encoding.UTF8.GetBytes("STUN_REQUEST");
-        await socket.SendAsync(request, request.Length, serverEndPoint);
-
-        using var timeout = new CancellationTokenSource(timeoutMs);
-        while (!timeout.IsCancellationRequested)
-        {
-            try
-            {
-                var result = await socket.ReceiveAsync(timeout.Token);
-                var response = Encoding.UTF8.GetString(result.Buffer);
-                var endpoint = TryParseLegacyResponse(response);
-                if (endpoint != null)
-                {
-                    return new StunBindingResult(endpoint, result.RemoteEndPoint, StandardProtocol: false);
-                }
-            }
-            catch (OperationCanceledException)
-            {
-                break;
-            }
-        }
-
-        throw new TimeoutException("STUN request timeout - no response received");
-    }
-
-    private static IPEndPoint? TryParseLegacyResponse(string response)
-    {
-        var stunResponse = MessageSerializer.Deserialize<StunResponse>(response);
-        if (stunResponse != null &&
-            !string.IsNullOrWhiteSpace(stunResponse.PublicIp) &&
-            stunResponse.PublicPort > 0)
-        {
-            return new IPEndPoint(IPAddress.Parse(stunResponse.PublicIp), stunResponse.PublicPort);
-        }
-
-        using var doc = JsonDocument.Parse(response);
-        var root = doc.RootElement;
-        if (!root.TryGetProperty("public_ip", out var ipEl) ||
-            !root.TryGetProperty("public_port", out var portEl))
-        {
-            return null;
-        }
-
-        var ip = ipEl.GetString();
-        var port = portEl.GetInt32();
-        if (string.IsNullOrWhiteSpace(ip) || port <= 0)
-        {
-            return null;
-        }
-
-        return new IPEndPoint(IPAddress.Parse(ip), port);
     }
 
     private static async Task<IPEndPoint> ResolveServerAsync(string host, int port)

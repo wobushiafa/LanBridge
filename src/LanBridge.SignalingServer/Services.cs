@@ -123,29 +123,6 @@ public class StunService : IDisposable
                 Console.WriteLine($"[STUN] Binding response to {result.RemoteEndPoint}" +
                                   (standardRequest.ChangePort && changePortClient != null ? " from alternate port" : ""));
                 OnStunRequest?.Invoke("STUN_BINDING_REQUEST", result.RemoteEndPoint);
-                return;
-            }
-
-            var message = Encoding.UTF8.GetString(result.Buffer);
-            Console.WriteLine($"[STUN] Received from {result.RemoteEndPoint}: {message.Substring(0, Math.Min(50, message.Length))}");
-            
-            if (!string.IsNullOrWhiteSpace(message) &&
-                (message.StartsWith("STUN_REQUEST", StringComparison.OrdinalIgnoreCase) ||
-                 message.StartsWith("Request", StringComparison.OrdinalIgnoreCase)))
-            {
-                var response = new StunResponse
-                {
-                    PublicIp = result.RemoteEndPoint.Address.ToString(),
-                    PublicPort = result.RemoteEndPoint.Port
-                };
-                
-                var responseJson = MessageSerializer.SerializeToString(response);
-                Console.WriteLine($"[STUN] Sending response: {responseJson}");
-                var responseData = Encoding.UTF8.GetBytes(responseJson);
-                await receiveClient.SendAsync(responseData, responseData.Length, result.RemoteEndPoint);
-                Console.WriteLine($"[STUN] Response sent to {result.RemoteEndPoint}");
-                
-                OnStunRequest?.Invoke(message, result.RemoteEndPoint);
             }
         }
         catch (Exception ex)

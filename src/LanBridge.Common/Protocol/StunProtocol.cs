@@ -34,8 +34,10 @@ public static class StunProtocol
     private const ushort AttributeMappedAddress = 0x0001;
     private const ushort AttributeChangeRequest = 0x0003;
     private const ushort AttributeXorMappedAddress = 0x0020;
+    private const ushort AttributeXorMappedAddressBackup = 0x8020;
     private const ushort AttributeSoftware = 0x8022;
     private const uint MagicCookie = 0x2112A442;
+    private static readonly byte[] MagicCookieBytes = new byte[] { 0x21, 0x12, 0xA4, 0x42 };
     private static readonly byte[] Software = Encoding.UTF8.GetBytes("LanBridge.SignalingServer");
 
     public static byte[] CreateBindingRequest(bool changeIp = false, bool changePort = false, byte[]? transactionId = null)
@@ -158,10 +160,11 @@ public static class StunProtocol
                 return false;
             }
 
-            if ((type == AttributeXorMappedAddress || type == AttributeMappedAddress) &&
-                TryReadAddressAttribute(data.AsSpan(offset, length), type == AttributeXorMappedAddress, transactionId, out var endpoint))
+            var isXor = type == AttributeXorMappedAddress || type == AttributeXorMappedAddressBackup;
+            if ((isXor || type == AttributeMappedAddress) &&
+                TryReadAddressAttribute(data.AsSpan(offset, length), isXor, transactionId, out var endpoint))
             {
-                if (type == AttributeXorMappedAddress)
+                if (isXor)
                 {
                     mappedEndPoint = endpoint;
                     return true;
@@ -185,23 +188,21 @@ public static class StunProtocol
         buffer[offset + 4] = 0;
         buffer[offset + 5] = addressBytes.Length == 4 ? (byte)0x01 : (byte)0x02;
 
-        var port = xor ? endpoint.Port ^ (int)(MagicCookie >> 16) : endpoint.Port;
+        var port = xor ? endpoint.Port ^ (ushort)(MagicCookie >> 16) : endpoint.Port;
         BinaryPrimitives.WriteUInt16BigEndian(buffer.AsSpan(offset + 6, 2), (ushort)port);
 
         if (xor && addressBytes.Length == 4)
         {
-            var cookieBytes = BitConverter.GetBytes(IPAddress.HostToNetworkOrder((int)MagicCookie));
             for (var i = 0; i < 4; i++)
             {
-                buffer[offset + 8 + i] = (byte)(addressBytes[i] ^ cookieBytes[i]);
+                buffer[offset + 8 + i] = (byte)(addressBytes[i] ^ MagicCookieBytes[i]);
             }
         }
         else if (xor)
         {
-            var cookieBytes = BitConverter.GetBytes(IPAddress.HostToNetworkOrder((int)MagicCookie));
             for (var i = 0; i < 4; i++)
             {
-                buffer[offset + 8 + i] = (byte)(addressBytes[i] ^ cookieBytes[i]);
+                buffer[offset + 8 + i] = (byte)(addressBytes[i] ^ MagicCookieBytes[i]);
             }
             for (var i = 0; i < 12; i++)
             {
@@ -236,10 +237,9 @@ public static class StunProtocol
             var addressBytes = attribute.Slice(4, 4).ToArray();
             if (xor)
             {
-                var cookieBytes = BitConverter.GetBytes(IPAddress.HostToNetworkOrder((int)MagicCookie));
                 for (var i = 0; i < 4; i++)
                 {
-                    addressBytes[i] ^= cookieBytes[i];
+                    addressBytes[i] ^= MagicCookieBytes[i];
                 }
             }
 
@@ -252,10 +252,9 @@ public static class StunProtocol
             var addressBytes = attribute.Slice(4, 16).ToArray();
             if (xor)
             {
-                var cookieBytes = BitConverter.GetBytes(IPAddress.HostToNetworkOrder((int)MagicCookie));
                 for (var i = 0; i < 4; i++)
                 {
-                    addressBytes[i] ^= cookieBytes[i];
+                    addressBytes[i] ^= MagicCookieBytes[i];
                 }
                 for (var i = 0; i < 12; i++)
                 {

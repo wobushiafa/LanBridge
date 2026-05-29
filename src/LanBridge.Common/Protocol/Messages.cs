@@ -11,10 +11,6 @@ namespace LanBridge.Common.Protocol;
 /// </summary>
 public enum MessageType : byte
 {
-    // STUN 相关
-    StunRequest = 1,
-    StunResponse = 2,
-    
     // 信令相关
     Register = 10,          // 内网节点注册
     RegisterAck = 11,       // 注册确认
@@ -52,30 +48,7 @@ public class BaseMessage
     public uint Conv { get; set; }
 }
 
-/// <summary>
-/// STUN 请求
-/// </summary>
-public class StunRequest : BaseMessage
-{
-    public StunRequest() => Type = MessageType.StunRequest;
-    
-    [JsonPropertyName("token")]
-    public string Token { get; set; } = string.Empty;
-}
 
-/// <summary>
-/// STUN 响应
-/// </summary>
-public class StunResponse : BaseMessage
-{
-    public StunResponse() => Type = MessageType.StunResponse;
-    
-    [JsonPropertyName("public_ip")]
-    public string PublicIp { get; set; } = string.Empty;
-    
-    [JsonPropertyName("public_port")]
-    public int PublicPort { get; set; }
-}
 
 /// <summary>
 /// 内网节点注册
@@ -434,9 +407,6 @@ public static class MessageSerializer
         return JsonSerializer.Serialize(message, message.GetType(), Options);
     }
     
-    /// <summary>
-    /// 从 JSON 字节反序列化
-    /// </summary>
     public static BaseMessage? Deserialize(byte[] data)
     {
         var doc = JsonDocument.Parse(data);
@@ -445,8 +415,6 @@ public static class MessageSerializer
         
         return type switch
         {
-            MessageType.StunRequest => JsonSerializer.Deserialize<StunRequest>(data, Options),
-            MessageType.StunResponse => JsonSerializer.Deserialize<StunResponse>(data, Options),
             MessageType.Register => JsonSerializer.Deserialize<RegisterMessage>(data, Options),
             MessageType.RegisterAck => JsonSerializer.Deserialize<RegisterAck>(data, Options),
             MessageType.ConnectRequest => JsonSerializer.Deserialize<ConnectRequest>(data, Options),
