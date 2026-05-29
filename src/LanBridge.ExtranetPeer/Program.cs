@@ -280,14 +280,48 @@ public class Program
     {
         mapping = new TunnelMapping();
         var equalsIndex = value.IndexOf('=');
-        var colonIndex = value.LastIndexOf(':');
-        if (equalsIndex <= 0 || colonIndex <= equalsIndex + 1 || colonIndex == value.Length - 1)
+        if (equalsIndex <= 0 || equalsIndex == value.Length - 1)
         {
             return false;
         }
 
-        if (!int.TryParse(value[..equalsIndex], out var localPort) ||
-            !int.TryParse(value[(colonIndex + 1)..], out var targetPort))
+        if (!int.TryParse(value[..equalsIndex], out var localPort))
+        {
+            return false;
+        }
+
+        var targetPart = value[(equalsIndex + 1)..];
+        var parts = targetPart.Split(':');
+        if (parts.Length < 2)
+        {
+            return false;
+        }
+
+        string protocol = "tcp";
+        int targetPort;
+        string targetHost;
+
+        var lastPart = parts[^1];
+        if (string.Equals(lastPart, "udp", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(lastPart, "tcp", StringComparison.OrdinalIgnoreCase))
+        {
+            protocol = lastPart.ToLowerInvariant();
+            if (parts.Length < 3 || !int.TryParse(parts[^2], out targetPort))
+            {
+                return false;
+            }
+            targetHost = string.Join(":", parts[..^2]);
+        }
+        else
+        {
+            if (!int.TryParse(lastPart, out targetPort))
+            {
+                return false;
+            }
+            targetHost = string.Join(":", parts[..^1]);
+        }
+
+        if (string.IsNullOrWhiteSpace(targetHost))
         {
             return false;
         }
@@ -295,8 +329,9 @@ public class Program
         mapping = new TunnelMapping
         {
             LocalPort = localPort,
-            TargetHost = value[(equalsIndex + 1)..colonIndex],
-            TargetPort = targetPort
+            TargetHost = targetHost,
+            TargetPort = targetPort,
+            Protocol = protocol
         };
         return true;
     }
@@ -315,7 +350,7 @@ public class Program
         Console.WriteLine("  --config, -c <path>             Load JSON config file");
         Console.WriteLine("  --target-node, -tn <id>         Target intranet node ID (default: intranet-peer-001)");
         Console.WriteLine("  --local-port, -lp <port>        Local proxy port (default: 8554)");
-        Console.WriteLine("  --map, -m <local=host:port>     Add TCP tunnel mapping, e.g. 8554=192.168.7.230:554");
+        Console.WriteLine("  --map, -m <local=host:port[:proto]> Add tunnel mapping, e.g. 8554=192.168.7.230:554 or 53=8.8.8.8:53:udp");
         Console.WriteLine("  --udp-port, -up <port>          UDP port for P2P (default: random)");
         Console.WriteLine("  --punch-timeout, -pt <ms>       Hole punch timeout in ms (default: 10000)");
         Console.WriteLine("  --no-relay                      Disable relay fallback");

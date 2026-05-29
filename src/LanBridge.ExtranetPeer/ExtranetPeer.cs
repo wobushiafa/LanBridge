@@ -28,10 +28,11 @@ public class TunnelMapping
     public int LocalPort { get; set; }
     public string TargetHost { get; set; } = string.Empty;
     public int TargetPort { get; set; }
+    public string Protocol { get; set; } = "tcp";
 
     public string Target => string.IsNullOrWhiteSpace(TargetHost) || TargetPort <= 0
         ? string.Empty
-        : $"{TargetHost}:{TargetPort}";
+        : $"{TargetHost}:{TargetPort}:{Protocol}";
 }
 
 public enum ConnectionState
@@ -50,6 +51,9 @@ public class ExtranetPeer : IDisposable
     private readonly ConnectionNegotiator _connection;
     private readonly List<TcpListener> _localProxies = new();
     private readonly ConcurrentDictionary<uint, TcpClient> _localClients = new();
+    private readonly List<UdpClient> _localUdpProxies = new();
+    private readonly ConcurrentDictionary<uint, UdpSession> _udpSessions = new();
+    private readonly ConcurrentDictionary<(int LocalPort, IPEndPoint ClientEndPoint), UdpSession> _udpClientSessions = new();
     private readonly CancellationTokenSource _cts = new();
     private bool _isRunning;
     private ConnectionState _state = ConnectionState.Disconnected;
@@ -59,6 +63,15 @@ public class ExtranetPeer : IDisposable
 
     public ConnectionState State => _state;
     public bool IsConnected => _connection.IsConnected;
+
+    private sealed class UdpSession
+    {
+        public required uint StreamId { get; init; }
+        public required IPEndPoint ClientEndPoint { get; init; }
+        public required UdpClient Listener { get; init; }
+        public required int LocalPort { get; init; }
+        public DateTime LastActivityUtc { get; set; } = DateTime.UtcNow;
+    }
 
     public ExtranetPeer(ClientConfig config)
     {
@@ -98,6 +111,7 @@ public class ExtranetPeer : IDisposable
         {
             await _connection.StartAsync();
             await StartLocalProxyAsync();
+            StartUdpSessionCleaner();
 
             while (_isRunning)
             {
@@ -149,26 +163,137 @@ public class ExtranetPeer : IDisposable
     {
         foreach (var mapping in _config.Mappings)
         {
-            try
+            if (string.Equals(mapping.Protocol, "udp", StringComparison.OrdinalIgnoreCase))
             {
-                var listener = new TcpListener(IPAddress.Loopback, mapping.LocalPort);
-                listener.Start();
-                _localProxies.Add(listener);
-                OnStatusChanged?.Invoke($"Local proxy started on 127.0.0.1:{mapping.LocalPort}" +
-                                        (string.IsNullOrWhiteSpace(mapping.Target) ? " -> intranet default target" : $" -> {mapping.Target}"));
-                _ = Task.Run(() => AcceptLocalClientsAsync(listener, mapping));
+                await StartUdpLocalProxyAsync(mapping);
             }
-            catch (SocketException ex) when (mapping.LocalPort == 1554)
+            else
             {
-                OnStatusChanged?.Invoke($"Local proxy port 1554 unavailable ({ex.Message}); retrying on 8554");
-                mapping.LocalPort = 8554;
-                var listener = new TcpListener(IPAddress.Loopback, mapping.LocalPort);
-                listener.Start();
-                _localProxies.Add(listener);
-                OnStatusChanged?.Invoke($"Local proxy started on 127.0.0.1:{mapping.LocalPort}");
-                _ = Task.Run(() => AcceptLocalClientsAsync(listener, mapping));
+                try
+                {
+                    var listener = new TcpListener(IPAddress.Loopback, mapping.LocalPort);
+                    listener.Start();
+                    _localProxies.Add(listener);
+                    OnStatusChanged?.Invoke($"Local TCP proxy started on 127.0.0.1:{mapping.LocalPort}" +
+                                            (string.IsNullOrWhiteSpace(mapping.Target) ? " -> intranet default target" : $" -> {mapping.Target}"));
+                    _ = Task.Run(() => AcceptLocalClientsAsync(listener, mapping));
+                }
+                catch (SocketException ex) when (mapping.LocalPort == 1554)
+                {
+                    OnStatusChanged?.Invoke($"Local TCP proxy port 1554 unavailable ({ex.Message}); retrying on 8554");
+                    mapping.LocalPort = 8554;
+                    var listener = new TcpListener(IPAddress.Loopback, mapping.LocalPort);
+                    listener.Start();
+                    _localProxies.Add(listener);
+                    OnStatusChanged?.Invoke($"Local TCP proxy started on 127.0.0.1:{mapping.LocalPort}");
+                    _ = Task.Run(() => AcceptLocalClientsAsync(listener, mapping));
+                }
             }
         }
+    }
+
+    private async Task StartUdpLocalProxyAsync(TunnelMapping mapping)
+    {
+        try
+        {
+            var localEp = new IPEndPoint(IPAddress.Loopback, mapping.LocalPort);
+            var udpClient = new UdpClient(localEp);
+            _localUdpProxies.Add(udpClient);
+            OnStatusChanged?.Invoke($"Local UDP proxy started on 127.0.0.1:{mapping.LocalPort}" +
+                                    (string.IsNullOrWhiteSpace(mapping.Target) ? " -> intranet default target" : $" -> {mapping.Target}"));
+            _ = Task.Run(() => ReceiveLocalUdpPacketsAsync(udpClient, mapping));
+        }
+        catch (Exception ex)
+        {
+            OnStatusChanged?.Invoke($"Failed to start local UDP proxy on {mapping.LocalPort}: {ex.Message}");
+        }
+    }
+
+    private async Task ReceiveLocalUdpPacketsAsync(UdpClient udpClient, TunnelMapping mapping)
+    {
+        while (_isRunning)
+        {
+            try
+            {
+                var result = await udpClient.ReceiveAsync(_cts.Token);
+                var clientEp = result.RemoteEndPoint;
+                var data = result.Buffer;
+
+                var sessionKey = (mapping.LocalPort, clientEp);
+                if (!_udpClientSessions.TryGetValue(sessionKey, out var session))
+                {
+                    var streamId = NextStreamId();
+                    session = new UdpSession
+                    {
+                        StreamId = streamId,
+                        ClientEndPoint = clientEp,
+                        Listener = udpClient,
+                        LocalPort = mapping.LocalPort,
+                        LastActivityUtc = DateTime.UtcNow
+                    };
+
+                    if (_udpSessions.TryAdd(streamId, session))
+                    {
+                        _udpClientSessions[sessionKey] = session;
+                        OnStatusChanged?.Invoke($"New UDP virtual session: stream {streamId} for {clientEp} on port {mapping.LocalPort}");
+
+                        if (!await _connection.EnsureConnectedAsync(TimeSpan.FromSeconds(15), _cts.Token))
+                        {
+                            OnStatusChanged?.Invoke($"UDP stream {streamId} closed: remote session not ready");
+                            _udpSessions.TryRemove(streamId, out _);
+                            _udpClientSessions.TryRemove(sessionKey, out _);
+                            continue;
+                        }
+
+                        await SendTunnelFrameToRemoteAsync(TunnelFrame.Open(streamId, mapping.Target));
+                    }
+                    else
+                    {
+                        continue;
+                    }
+                }
+
+                session.LastActivityUtc = DateTime.UtcNow;
+                await SendTunnelFrameToRemoteAsync(TunnelFrame.Data(session.StreamId, data, 0, data.Length));
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+            catch (Exception) when (!_isRunning)
+            {
+                break;
+            }
+            catch (Exception ex)
+            {
+                OnStatusChanged?.Invoke($"UDP receive error on port {mapping.LocalPort}: {ex.Message}");
+            }
+        }
+    }
+
+    private void StartUdpSessionCleaner()
+    {
+        _ = Task.Run(async () =>
+        {
+            using var timer = new PeriodicTimer(TimeSpan.FromSeconds(5));
+            while (await timer.WaitForNextTickAsync(_cts.Token))
+            {
+                var now = DateTime.UtcNow;
+                foreach (var session in _udpSessions.Values)
+                {
+                    if (now - session.LastActivityUtc > TimeSpan.FromSeconds(30))
+                    {
+                        var streamId = session.StreamId;
+                        if (_udpSessions.TryRemove(streamId, out _))
+                        {
+                            _udpClientSessions.TryRemove((session.LocalPort, session.ClientEndPoint), out _);
+                            OnStatusChanged?.Invoke($"UDP virtual session idle timeout: stream {streamId}");
+                            _ = CloseRemoteTargetAsync(streamId);
+                        }
+                    }
+                }
+            }
+        }, _cts.Token);
     }
 
     private async Task AcceptLocalClientsAsync(TcpListener listener, TunnelMapping mapping)
@@ -267,25 +392,44 @@ public class ExtranetPeer : IDisposable
             return;
         }
 
-        if (frame.Type == TunnelFrameType.Data &&
-            _localClients.TryGetValue(frame.StreamId, out var client) &&
-            client.Connected)
+        if (frame.Type == TunnelFrameType.Data)
         {
-            try
+            if (_udpSessions.TryGetValue(frame.StreamId, out var udpSession))
             {
-                var stream = client.GetStream();
-                stream.Write(frame.Payload, 0, frame.Payload.Length);
-                stream.Flush();
-                OnDataReceived?.Invoke(frame.Payload, frame.Payload.Length);
+                try
+                {
+                    udpSession.LastActivityUtc = DateTime.UtcNow;
+                    udpSession.Listener.Send(frame.Payload, frame.Payload.Length, udpSession.ClientEndPoint);
+                    OnDataReceived?.Invoke(frame.Payload, frame.Payload.Length);
+                }
+                catch (Exception ex)
+                {
+                    OnStatusChanged?.Invoke($"Write to local UDP stream {frame.StreamId} ({udpSession.ClientEndPoint}) error: {ex.Message}");
+                }
             }
-            catch (Exception ex)
+            else if (_localClients.TryGetValue(frame.StreamId, out var client) && client.Connected)
             {
-                OnStatusChanged?.Invoke($"Write to local stream {frame.StreamId} error: {ex.Message}");
+                try
+                {
+                    var stream = client.GetStream();
+                    stream.Write(frame.Payload, 0, frame.Payload.Length);
+                    stream.Flush();
+                    OnDataReceived?.Invoke(frame.Payload, frame.Payload.Length);
+                }
+                catch (Exception ex)
+                {
+                    OnStatusChanged?.Invoke($"Write to local stream {frame.StreamId} error: {ex.Message}");
+                }
             }
         }
         else if (frame.Type == TunnelFrameType.Close)
         {
-            if (_localClients.TryRemove(frame.StreamId, out var closeClient))
+            if (_udpSessions.TryRemove(frame.StreamId, out var udpSession))
+            {
+                _udpClientSessions.TryRemove((udpSession.LocalPort, udpSession.ClientEndPoint), out _);
+                OnStatusChanged?.Invoke($"UDP virtual session closed by remote: stream {frame.StreamId}");
+            }
+            else if (_localClients.TryRemove(frame.StreamId, out var closeClient))
             {
                 closeClient.Dispose();
             }
@@ -293,7 +437,11 @@ public class ExtranetPeer : IDisposable
         else if (frame.Type == TunnelFrameType.Error)
         {
             OnStatusChanged?.Invoke($"Remote stream {frame.StreamId} error: {frame.PayloadAsString()}");
-            if (_localClients.TryRemove(frame.StreamId, out var errorClient))
+            if (_udpSessions.TryRemove(frame.StreamId, out var udpSession))
+            {
+                _udpClientSessions.TryRemove((udpSession.LocalPort, udpSession.ClientEndPoint), out _);
+            }
+            else if (_localClients.TryRemove(frame.StreamId, out var errorClient))
             {
                 errorClient.Dispose();
             }
@@ -334,6 +482,14 @@ public class ExtranetPeer : IDisposable
             client.Dispose();
         }
 
+        foreach (var proxy in _localUdpProxies)
+        {
+            try { proxy.Dispose(); } catch { }
+        }
+
         _localClients.Clear();
+        _localUdpProxies.Clear();
+        _udpSessions.Clear();
+        _udpClientSessions.Clear();
     }
 }

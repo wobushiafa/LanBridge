@@ -44,7 +44,7 @@ public class IntranetPeer : IDisposable
 {
     private readonly PeerConfig _config;
     private readonly ConnectionNegotiator _connection;
-    private readonly ConcurrentDictionary<StreamKey, TargetConnection> _targetConnections = new();
+    private readonly ConcurrentDictionary<StreamKey, Task<TargetConnection>> _targetConnections = new();
     private readonly SemaphoreSlim _targetConnectionLock = new(1, 1);
     private readonly CancellationTokenSource _cts = new();
     private bool _isRunning;
@@ -53,10 +53,62 @@ public class IntranetPeer : IDisposable
 
     public bool IsConnected => _connection.IsConnected;
 
-    private sealed class TargetConnection
+    private abstract class TargetConnection : IDisposable
+    {
+        public abstract bool IsConnected { get; }
+        public abstract Task WriteAsync(byte[] data, int offset, int length);
+        public abstract void Dispose();
+    }
+
+    private sealed class TcpTargetConnection : TargetConnection
     {
         public required TcpClient Client { get; init; }
         public required NetworkStream Stream { get; init; }
+
+        public override bool IsConnected => Client.Connected;
+
+        public override async Task WriteAsync(byte[] data, int offset, int length)
+        {
+            await Stream.WriteAsync(data, offset, length);
+            await Stream.FlushAsync();
+        }
+
+        public override void Dispose()
+        {
+            try { Stream.Dispose(); } catch { }
+            try { Client.Dispose(); } catch { }
+        }
+    }
+
+    private sealed class UdpTargetConnection : TargetConnection
+    {
+        private bool _isDisposed;
+        public required UdpClient Client { get; init; }
+        public required IPEndPoint RemoteEndPoint { get; init; }
+        public DateTime LastActivityUtc { get; set; } = DateTime.UtcNow;
+
+        public override bool IsConnected => !_isDisposed;
+
+        public override async Task WriteAsync(byte[] data, int offset, int length)
+        {
+            if (offset == 0 && length == data.Length)
+            {
+                await Client.SendAsync(data, length, RemoteEndPoint);
+            }
+            else
+            {
+                var segment = new byte[length];
+                Buffer.BlockCopy(data, offset, segment, 0, length);
+                await Client.SendAsync(segment, length, RemoteEndPoint);
+            }
+            LastActivityUtc = DateTime.UtcNow;
+        }
+
+        public override void Dispose()
+        {
+            _isDisposed = true;
+            try { Client.Dispose(); } catch { }
+        }
     }
 
     public IntranetPeer(PeerConfig config)
@@ -89,6 +141,7 @@ public class IntranetPeer : IDisposable
         try
         {
             await _connection.StartAsync();
+            StartUdpTargetCleaner();
 
             while (_isRunning)
             {
@@ -151,8 +204,7 @@ public class IntranetPeer : IDisposable
         try
         {
             var connection = await EnsureTargetConnectionAsync(sessionId, streamId, null);
-            await connection.Stream.WriteAsync(data, offset, length);
-            await connection.Stream.FlushAsync();
+            await connection.WriteAsync(data, offset, length);
         }
         catch (Exception ex)
         {
@@ -163,49 +215,114 @@ public class IntranetPeer : IDisposable
         }
     }
 
-    private async Task<TargetConnection> EnsureTargetConnectionAsync(string sessionId, uint streamId, (string Host, int Port)? requestedTarget)
+    private async Task<TargetConnection> EnsureTargetConnectionAsync(string sessionId, uint streamId, (string Host, int Port, string Protocol)? requestedTarget)
     {
         var key = new StreamKey(sessionId, streamId);
-        if (_targetConnections.TryGetValue(key, out var existing) && existing.Client.Connected)
+        if (_targetConnections.TryGetValue(key, out var existingTask))
         {
-            return existing;
+            try
+            {
+                var conn = await existingTask;
+                if (conn.IsConnected)
+                {
+                    return conn;
+                }
+            }
+            catch
+            {
+                _targetConnections.TryRemove(key, out _);
+            }
+        }
+
+        if (requestedTarget == null)
+        {
+            throw new InvalidOperationException($"Stream {streamId} is not open.");
         }
 
         await _targetConnectionLock.WaitAsync(_cts.Token);
         try
         {
-            if (_targetConnections.TryGetValue(key, out existing) && existing.Client.Connected)
+            if (_targetConnections.TryGetValue(key, out existingTask))
             {
-                return existing;
+                try
+                {
+                    var conn = await existingTask;
+                    if (conn.IsConnected)
+                    {
+                        return conn;
+                    }
+                }
+                catch
+                {
+                    _targetConnections.TryRemove(key, out _);
+                }
             }
 
-            CloseTargetConnection(sessionId, streamId);
-
-            var targetHost = requestedTarget?.Host ?? _config.TargetSourceHost;
-            var targetPort = requestedTarget?.Port ?? _config.TargetSourcePort;
+            var targetHost = requestedTarget.Value.Host;
+            var targetPort = requestedTarget.Value.Port;
+            var protocol = requestedTarget.Value.Protocol;
             EnsureTargetAllowed(targetHost, targetPort);
 
-            var client = new TcpClient();
-            try
+            var connTask = Task.Run<TargetConnection>(async () =>
             {
-                await client.ConnectAsync(targetHost, targetPort);
-            }
-            catch
-            {
-                client.Dispose();
-                throw;
-            }
+                if (string.Equals(protocol, "udp", StringComparison.OrdinalIgnoreCase))
+                {
+                    UdpClient client;
+                    IPEndPoint targetEp;
+                    try
+                    {
+                        var addresses = await Dns.GetHostAddressesAsync(targetHost);
+                        var ip = addresses.FirstOrDefault(a => a.AddressFamily == AddressFamily.InterNetwork || a.AddressFamily == AddressFamily.InterNetworkV6);
+                        if (ip == null)
+                        {
+                            throw new Exception($"Could not resolve host: {targetHost}");
+                        }
+                        targetEp = new IPEndPoint(ip, targetPort);
+                        
+                        var localEp = new IPEndPoint(ip.AddressFamily == AddressFamily.InterNetworkV6 ? IPAddress.IPv6Any : IPAddress.Any, 0);
+                        client = new UdpClient(localEp);
+                    }
+                    catch
+                    {
+                        throw;
+                    }
 
-            var connection = new TargetConnection
-            {
-                Client = client,
-                Stream = client.GetStream()
-            };
-            _targetConnections[key] = connection;
-            OnStatusChanged?.Invoke($"Connected session {sessionId}, stream {streamId} to target source {targetHost}:{targetPort}");
+                    var connection = new UdpTargetConnection
+                    {
+                        Client = client,
+                        RemoteEndPoint = targetEp,
+                        LastActivityUtc = DateTime.UtcNow
+                    };
 
-            _ = Task.Run(() => ReadTargetLoopAsync(sessionId, streamId, connection));
-            return connection;
+                    _ = Task.Run(() => ReadUdpTargetLoopAsync(sessionId, streamId, connection));
+                    return connection;
+                }
+                else
+                {
+                    var client = new TcpClient();
+                    try
+                    {
+                        await client.ConnectAsync(targetHost, targetPort);
+                    }
+                    catch
+                    {
+                        client.Dispose();
+                        throw;
+                    }
+
+                    var connection = new TcpTargetConnection
+                    {
+                        Client = client,
+                        Stream = client.GetStream()
+                    };
+
+                    _ = Task.Run(() => ReadTcpTargetLoopAsync(sessionId, streamId, connection));
+                    return connection;
+                }
+            });
+
+            _targetConnections[key] = connTask;
+            return await connTask;
         }
         finally
         {
@@ -213,7 +330,7 @@ public class IntranetPeer : IDisposable
         }
     }
 
-    private async Task ReadTargetLoopAsync(string sessionId, uint streamId, TargetConnection connection)
+    private async Task ReadTcpTargetLoopAsync(string sessionId, uint streamId, TcpTargetConnection connection)
     {
         var buffer = new byte[65536];
 
@@ -235,7 +352,7 @@ public class IntranetPeer : IDisposable
         }
         catch (Exception ex)
         {
-            OnStatusChanged?.Invoke($"Target read error on stream {streamId}: {ex.Message}");
+            OnStatusChanged?.Invoke($"TCP target read error on stream {streamId}: {ex.Message}");
             await SendTunnelFrameAsync(sessionId, TunnelFrame.Error(streamId, ex.Message));
         }
         finally
@@ -245,7 +362,71 @@ public class IntranetPeer : IDisposable
         }
     }
 
-    private (string Host, int Port)? GetTargetFromPayload(byte[] payload)
+    private async Task ReadUdpTargetLoopAsync(string sessionId, uint streamId, UdpTargetConnection connection)
+    {
+        while (_isRunning && connection.IsConnected)
+        {
+            try
+            {
+                var result = await connection.Client.ReceiveAsync(_cts.Token);
+                connection.LastActivityUtc = DateTime.UtcNow;
+                await SendTunnelFrameAsync(sessionId, TunnelFrame.Data(streamId, result.Buffer, 0, result.Buffer.Length));
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+            catch (Exception) when (!_isRunning || !connection.IsConnected)
+            {
+                break;
+            }
+            catch (Exception ex)
+            {
+                OnStatusChanged?.Invoke($"UDP target read error on stream {streamId}: {ex.Message}");
+                await SendTunnelFrameAsync(sessionId, TunnelFrame.Error(streamId, ex.Message));
+                break;
+            }
+        }
+
+        CloseTargetConnection(sessionId, streamId);
+        await SendTunnelFrameAsync(sessionId, TunnelFrame.Close(streamId));
+    }
+
+    private void StartUdpTargetCleaner()
+    {
+        _ = Task.Run(async () =>
+        {
+            using var timer = new PeriodicTimer(TimeSpan.FromSeconds(5));
+            while (await timer.WaitForNextTickAsync(_cts.Token))
+            {
+                var now = DateTime.UtcNow;
+                foreach (var kvp in _targetConnections)
+                {
+                    var task = kvp.Value;
+                    if (task.Status == TaskStatus.RanToCompletion)
+                    {
+                        try
+                        {
+                            var conn = task.Result;
+                            if (conn is UdpTargetConnection udpConn)
+                            {
+                                if (now - udpConn.LastActivityUtc > TimeSpan.FromSeconds(60))
+                                {
+                                    var key = kvp.Key;
+                                    CloseTargetConnection(key.SessionId, key.StreamId);
+                                    OnStatusChanged?.Invoke($"UDP target connection idle timeout: session {key.SessionId}, stream {key.StreamId}");
+                                    _ = SendTunnelFrameAsync(key.SessionId, TunnelFrame.Close(key.StreamId));
+                                }
+                            }
+                        }
+                        catch { }
+                    }
+                }
+            }
+        }, _cts.Token);
+    }
+
+    private (string Host, int Port, string Protocol)? GetTargetFromPayload(byte[] payload)
     {
         if (payload.Length == 0)
         {
@@ -253,14 +434,37 @@ public class IntranetPeer : IDisposable
         }
 
         var target = Encoding.UTF8.GetString(payload);
-        var separatorIndex = target.LastIndexOf(':');
-        if (separatorIndex <= 0 || separatorIndex == target.Length - 1 ||
-            !int.TryParse(target[(separatorIndex + 1)..], out var port))
+        var parts = target.Split(':');
+        if (parts.Length < 2)
         {
             throw new InvalidDataException($"Invalid target endpoint: {target}");
         }
 
-        return (target[..separatorIndex], port);
+        string protocol = "tcp";
+        int port;
+        string host;
+
+        var lastPart = parts[^1];
+        if (string.Equals(lastPart, "udp", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(lastPart, "tcp", StringComparison.OrdinalIgnoreCase))
+        {
+            protocol = lastPart.ToLowerInvariant();
+            if (parts.Length < 3 || !int.TryParse(parts[^2], out port))
+            {
+                throw new InvalidDataException($"Invalid target endpoint: {target}");
+            }
+            host = string.Join(":", parts[..^2]);
+        }
+        else
+        {
+            if (!int.TryParse(lastPart, out port))
+            {
+                throw new InvalidDataException($"Invalid target endpoint: {target}");
+            }
+            host = string.Join(":", parts[..^1]);
+        }
+
+        return (host, port, protocol);
     }
 
     private void EnsureDefaultAllowedTarget()
@@ -342,19 +546,34 @@ public class IntranetPeer : IDisposable
 
     private async Task SendTunnelFrameAsync(string sessionId, TunnelFrame frame)
     {
-        var bytes = frame.Encode();
-        await SendToExtranetAsync(sessionId, bytes, 0, bytes.Length);
+        try
+        {
+            var bytes = frame.Encode();
+            await SendToExtranetAsync(sessionId, bytes, 0, bytes.Length);
+        }
+        catch (Exception ex)
+        {
+            if (_config.Verbose)
+            {
+                OnStatusChanged?.Invoke($"Failed to send frame {frame.Type} for stream {frame.StreamId}: {ex.Message}");
+            }
+        }
     }
 
     private void CloseTargetConnection(string sessionId, uint streamId)
     {
-        if (!_targetConnections.TryRemove(new StreamKey(sessionId, streamId), out var connection))
+        if (!_targetConnections.TryRemove(new StreamKey(sessionId, streamId), out var connTask))
         {
             return;
         }
 
-        try { connection.Stream.Dispose(); } catch { }
-        try { connection.Client.Dispose(); } catch { }
+        _ = connTask.ContinueWith(t =>
+        {
+            if (t.Status == TaskStatus.RanToCompletion)
+            {
+                try { t.Result.Dispose(); } catch { }
+            }
+        });
     }
 
     private void CloseAllTargetConnections()
