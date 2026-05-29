@@ -44,6 +44,18 @@ public class KcpSegment
     /// <summary>负载数据</summary>
     public byte[] Data { get; set; } = Array.Empty<byte>();
     
+    public bool IsRented { get; set; }
+    
+    public void Free()
+    {
+        if (IsRented && Data != null && Data != Array.Empty<byte>())
+        {
+            System.Buffers.ArrayPool<byte>.Shared.Return(Data);
+            Data = Array.Empty<byte>();
+            IsRented = false;
+        }
+    }
+    
     /// <summary>头部大小</summary>
     public const int HeaderSize = 24;
     

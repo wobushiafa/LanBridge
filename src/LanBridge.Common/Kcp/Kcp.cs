@@ -13,8 +13,8 @@ public class Kcp : IDisposable
     private const int RtoMin = 100;
     private const int RtoDef = 200;
     private const int RtoMax = 60000;
-    private const int WndSnd = 128;
-    private const int WndRcv = 128;
+    private const int WndSnd = 1024;
+    private const int WndRcv = 1024;
     private const int MtuDef = 1400;
     private const int Interval = 100;
     private const int Overhead = 24;
@@ -131,6 +131,7 @@ public class Kcp : IDisposable
             
             fragment = seg.Frg;
             _rcvQueue.Dequeue();
+            seg.Free();
             
             if (fragment == 0)
                 break;
@@ -184,7 +185,8 @@ public class Kcp : IDisposable
                 Sn = 0,
                 Una = _rcvNxt,
                 Len = (uint)size,
-                Data = new byte[size]
+                Data = System.Buffers.ArrayPool<byte>.Shared.Rent(size),
+                IsRented = true
             };
             
             Array.Copy(data, offset + i * (int)_mss, seg.Data, 0, size);
@@ -258,14 +260,18 @@ public class Kcp : IDisposable
                 if (size < (int)seg.Len)
                     break;
                 
-                seg.Data = new byte[seg.Len];
+                seg.Data = System.Buffers.ArrayPool<byte>.Shared.Rent((int)seg.Len);
+                seg.IsRented = true;
                 Array.Copy(data, offset, seg.Data, 0, (int)seg.Len);
                 offset += (int)seg.Len;
                 size -= (int)seg.Len;
             }
             
             if (seg.Conv != _conv)
+            {
+                seg.Free();
                 return -1;
+            }
             
             _rmtWnd = seg.Wnd;
             
@@ -288,6 +294,7 @@ public class Kcp : IDisposable
                         flag = 1;
                         _tsRecent = seg.Ts;
                     }
+                    seg.Free();
                     break;
                 
                 case KcpSegment.CmdPush:
@@ -299,19 +306,30 @@ public class Kcp : IDisposable
                         {
                             ParseData(seg);
                         }
+                        else
+                        {
+                            seg.Free();
+                        }
+                    }
+                    else
+                    {
+                        seg.Free();
                     }
                     break;
                 
                 case KcpSegment.CmdAsk:
                     // 窗口探测
                     _probe |= 2;
+                    seg.Free();
                     break;
                 
                 case KcpSegment.CmdTell:
                     // 窗口通告
+                    seg.Free();
                     break;
                 
                 default:
+                    seg.Free();
                     return -1;
             }
         }
@@ -606,6 +624,7 @@ public class Kcp : IDisposable
             if (sn == seg.Sn)
             {
                 _sndBuf.RemoveAt(i);
+                seg.Free();
                 break;
             }
             
@@ -629,7 +648,13 @@ public class Kcp : IDisposable
         }
         
         if (count > 0)
+        {
+            for (int i = 0; i < count; i++)
+            {
+                _sndBuf[i].Free();
+            }
             _sndBuf.RemoveRange(0, count);
+        }
     }
     
     /// <summary>
@@ -640,7 +665,10 @@ public class Kcp : IDisposable
         uint sn = newseg.Sn;
         
         if (TimeDiff(sn, _rcvNxt + _rcvWnd) >= 0 || TimeDiff(sn, _rcvNxt) < 0)
+        {
+            newseg.Free();
             return;
+        }
         
         // 插入到接收缓冲区（有序）
         int insertIndex = _rcvBuf.Count;
@@ -648,7 +676,10 @@ public class Kcp : IDisposable
         {
             var seg = _rcvBuf[i];
             if (seg.Sn == sn)
-                return; // 重复包
+            {
+                newseg.Free(); // 重复包
+                return;
+            }
             
             if (TimeDiff(sn, seg.Sn) > 0)
             {
@@ -751,7 +782,12 @@ public class Kcp : IDisposable
     
     public void Dispose()
     {
-        // 清理资源
+        while (_sndQueue.TryDequeue(out var seg)) seg.Free();
+        while (_rcvQueue.TryDequeue(out var seg)) seg.Free();
+        foreach (var seg in _sndBuf) seg.Free();
+        _sndBuf.Clear();
+        foreach (var seg in _rcvBuf) seg.Free();
+        _rcvBuf.Clear();
     }
 }
 

@@ -211,6 +211,11 @@ public class UdpHolePuncher : IDisposable
             OnHolePunched?.Invoke(remoteEndPoint);
         }
     }
+
+    public void RemovePunchedEndpoint(IPEndPoint remoteEndPoint)
+    {
+        _punchedEndpoints.TryRemove(remoteEndPoint.ToString(), out _);
+    }
     
     /// <summary>
     /// 发送数据
@@ -609,9 +614,10 @@ public class KcpSession : IDisposable
             }
         }, remoteEp);
         
-        // 设置无延迟模式
+        // 设置无延迟模式与窗口大小
         _kcp.SetMtu((uint)mtu);
         _kcp.SetNodelay(1, 10, 2, enableCongestionControl ? 0 : 1);
+        _kcp.WndSize(1024, 1024);
     }
     
     /// <summary>

@@ -409,6 +409,7 @@ public sealed class ConnectionNegotiator : IDisposable
             if (!_pendingPunches.TryRemove(endpoint.Address.ToString(), out var pending))
             {
                 OnStatusChanged?.Invoke($"Hole punched endpoint has no pending session: {endpoint}");
+                _holePuncher.RemovePunchedEndpoint(endpoint);
                 return;
             }
 
