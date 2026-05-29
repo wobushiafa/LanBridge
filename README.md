@@ -32,22 +32,22 @@
 
 ```mermaid
 flowchart TB
-    subgraph Extranet [外网客户端 (ExtranetPeer)]
+    subgraph Extranet ["外网客户端 (ExtranetPeer)"]
         LocalTCP["TCP 代理监听器"]
         LocalUDP["UDP 代理监听器"]
         ExtSession["会话流分发器 (StreamId)"]
     end
 
-    subgraph Internet [公网基础设施]
+    subgraph Internet ["公网基础设施"]
         Server["LanBridge.SignalingServer<br/>(信令 / STUN / Relay 中继)"]
     end
 
-    subgraph Intranet [内网端 (IntranetPeer)]
+    subgraph Intranet ["内网端 (IntranetPeer)"]
         IntSession["并发状态管理器<br/>(Task-based Dict)"]
         TargetRouter["双向转发模块"]
     end
 
-    subgraph LAN [内网局域网设备]
+    subgraph LAN ["内网局域网设备"]
         HTTP["HTTP (80/8080)"]
         RTSP["RTSP/RTP Stream"]
         Game["UDP 游戏服务器"]
