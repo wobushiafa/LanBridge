@@ -103,6 +103,13 @@ public class Kcp : IDisposable
         if (_rcvQueue.Count == 0)
             return -1;
         
+        int peekSize = PeekSize();
+        if (peekSize < 0)
+            return -1;
+            
+        if (length < peekSize)
+            return -2;
+        
         int recover = _rcvQueue.Count >= _rcvWnd ? 1 : 0;
         
         // 合并分片
@@ -321,12 +328,19 @@ public class Kcp : IDisposable
             return -1;
         
         int length = 0;
+        bool hasEnd = false;
         foreach (var seg in _rcvQueue)
         {
             length += (int)seg.Len;
             if (seg.Frg == 0)
+            {
+                hasEnd = true;
                 break;
+            }
         }
+        
+        if (!hasEnd)
+            return -1;
         
         return length;
     }
