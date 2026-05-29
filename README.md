@@ -56,23 +56,23 @@ flowchart TB
     %% 信令连接
     LocalTCP --> ExtSession
     LocalUDP --> ExtSession
-    Extranet -->|双向信令交互| Server
-    Intranet -->|双向信令注册| Server
+    ExtSession -->| "双向信令交互" | Server
+    IntSession -->| "双向信令注册" | Server
 
     %% 穿透与回退链路
-    Extranet -.->|⚡ P2P UDP 直连打洞 (KCP 1024 窗口)| Intranet
-    Extranet ===>|🛡️ Relay Fallback 极速中继| Server ===> Intranet
+    ExtSession -.->| "⚡ P2P UDP 直连打洞 (KCP 1024 窗口)" | IntSession
+    ExtSession ===>| "🛡️ Relay Fallback 极速中继" | Server ===> IntSession
 
     %% 局域网分发
-    Intranet --> TargetRouter
-    TargetRouter -->|TCP 转发| HTTP
-    TargetRouter -->|TCP / UDP 转发| RTSP
-    TargetRouter -->|UDP 转发| Game
+    IntSession --> TargetRouter
+    TargetRouter -->| "TCP 转发" | HTTP
+    TargetRouter -->| "TCP / UDP 转发" | RTSP
+    TargetRouter -->| "UDP 转发" | Game
 
     classDef peer fill:#1e293b,stroke:#3b82f6,stroke-width:2px,color:#f8fafc;
     classDef server fill:#1e1b4b,stroke:#818cf8,stroke-width:2px,color:#f8fafc;
     classDef lan fill:#022c22,stroke:#10b981,stroke-width:2px,color:#f8fafc;
-    class Extranet,Intranet peer;
+    class LocalTCP,LocalUDP,ExtSession,IntSession,TargetRouter peer;
     class Server server;
     class HTTP,RTSP,Game lan;
 ```
