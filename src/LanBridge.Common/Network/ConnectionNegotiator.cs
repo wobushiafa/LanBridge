@@ -39,6 +39,7 @@ public sealed class ConnectionNegotiator : IDisposable
     private SignalingClient? _signalingClient;
     private UdpHolePuncher? _holePuncher;
     private IPEndPoint? _publicEndPoint;
+    private IPEndPoint? _publicEndPointV6;
     private NatDetectionResult? _natDetection;
     private CancellationTokenSource? _relayProbeCts;
     private bool _isHolePunching;
@@ -221,7 +222,8 @@ public sealed class ConnectionNegotiator : IDisposable
             var request = new ConnectRequest
             {
                 TargetNodeId = _options.TargetNodeId,
-                ClientEndPoint = _publicEndPoint?.ToString()
+                ClientEndPoint = _publicEndPoint?.ToString(),
+                ClientEndPointV6 = _publicEndPointV6?.ToString()
             };
 
             await _signalingClient.SendAsync(MessageSerializer.SerializeToString(request));
@@ -249,17 +251,41 @@ public sealed class ConnectionNegotiator : IDisposable
 
         _natDetection = result;
         _publicEndPoint = result.PublicEndPoint;
-        if (_publicEndPoint == null)
+
+        try
         {
-            OnStatusChanged?.Invoke($"STUN unavailable, continuing with relay fallback: {result.Reason}");
+            _publicEndPointV6 = await StunClient.QueryPublicEndPointV6Async(
+                holePuncher,
+                _options.StunServerHost,
+                _options.StunServerPort,
+                timeoutMs: 2000);
+            if (_publicEndPointV6 != null)
+            {
+                OnStatusChanged?.Invoke($"IPv6 public endpoint: {_publicEndPointV6}");
+            }
+        }
+        catch (Exception ex)
+        {
+            if (_options.Verbose)
+            {
+                OnStatusChanged?.Invoke($"IPv6 STUN query failed: {ex.Message}");
+            }
+        }
+
+        if (_publicEndPoint == null && _publicEndPointV6 == null)
+        {
+            OnStatusChanged?.Invoke($"STUN unavailable (both v4/v6), continuing with relay fallback: {result.Reason}");
             return;
         }
 
-        var mapping = result.PortPreserved ? "port-preserved" : "port-mapped";
-        OnStatusChanged?.Invoke($"Public endpoint: {_publicEndPoint}");
-        OnStatusChanged?.Invoke($"NAT mapping: {holePuncher.LocalEndPoint} -> {_publicEndPoint} ({mapping})");
-        OnStatusChanged?.Invoke($"NAT type: {FormatNatType(result.NatType)}");
-        OnStatusChanged?.Invoke($"NAT diagnosis: {result.Reason}");
+        if (_publicEndPoint != null)
+        {
+            var mapping = result.PortPreserved ? "port-preserved" : "port-mapped";
+            OnStatusChanged?.Invoke($"Public endpoint (IPv4): {_publicEndPoint}");
+            OnStatusChanged?.Invoke($"NAT mapping: {holePuncher.LocalEndPoint} -> {_publicEndPoint} ({mapping})");
+            OnStatusChanged?.Invoke($"NAT type: {FormatNatType(result.NatType)}");
+            OnStatusChanged?.Invoke($"NAT diagnosis: {result.Reason}");
+        }
     }
 
     private static string FormatNatType(StunNatType natType)
@@ -298,7 +324,8 @@ public sealed class ConnectionNegotiator : IDisposable
         {
             NodeId = _options.NodeId,
             Token = _options.Token,
-            PublicEndPoint = _publicEndPoint?.ToString()
+            PublicEndPoint = _publicEndPoint?.ToString(),
+            PublicEndPointV6 = _publicEndPointV6?.ToString()
         };
 
         await _signalingClient!.SendAsync(MessageSerializer.SerializeToString(register));
@@ -341,36 +368,69 @@ public sealed class ConnectionNegotiator : IDisposable
     {
         var sessionId = string.IsNullOrWhiteSpace(message.SessionId) ? _activeSessionId : message.SessionId;
         _activeSessionId = sessionId;
+        
         var target = _options.Role == PeerConnectionRole.Intranet
             ? message.ExtranetEndPoint
             : message.IntranetEndPoint;
 
-        if (string.IsNullOrWhiteSpace(target))
+        var targetV6 = _options.Role == PeerConnectionRole.Intranet
+            ? message.ExtranetEndPointV6
+            : message.IntranetEndPointV6;
+
+        if (string.IsNullOrWhiteSpace(target) && string.IsNullOrWhiteSpace(targetV6))
         {
             OnStatusChanged?.Invoke("No remote UDP endpoint available. Falling back to relay...");
             await RequestRelayIfAllowedAsync();
             return;
         }
 
-        OnStatusChanged?.Invoke($"Connection ready. Starting hole punch to {target}");
-        await StartHolePunchAsync(sessionId, message.Conv, IPEndPoint.Parse(target), allowRelayFallback: _options.Role == PeerConnectionRole.Extranet);
+        IPEndPoint? targetEp = null;
+        if (!string.IsNullOrWhiteSpace(target) && IPEndPoint.TryParse(target, out var parsedEp))
+        {
+            targetEp = parsedEp;
+        }
+
+        IPEndPoint? targetEpV6 = null;
+        if (!string.IsNullOrWhiteSpace(targetV6) && IPEndPoint.TryParse(targetV6, out var parsedEpV6))
+        {
+            targetEpV6 = parsedEpV6;
+        }
+
+        var displayTarget = targetEpV6 != null ? $"{targetEp} / {targetEpV6}" : targetEp?.ToString() ?? string.Empty;
+        OnStatusChanged?.Invoke($"Connection ready. Starting hole punch to {displayTarget}");
+        
+        await StartHolePunchAsync(sessionId, message.Conv, targetEp, targetEpV6, allowRelayFallback: _options.Role == PeerConnectionRole.Extranet);
     }
 
     private async Task HandleHolePunchStartAsync(HolePunchStart message)
     {
         var sessionId = string.IsNullOrWhiteSpace(message.SessionId) ? Guid.NewGuid().ToString("N")[..8] : message.SessionId;
-        if (string.IsNullOrWhiteSpace(message.TargetEndPoint))
+        if (string.IsNullOrWhiteSpace(message.TargetEndPoint) && string.IsNullOrWhiteSpace(message.TargetEndPointV6))
         {
             OnStatusChanged?.Invoke("No target UDP endpoint available. Falling back to relay...");
             await RequestRelayIfAllowedAsync();
             return;
         }
 
-        OnStatusChanged?.Invoke($"Hole punch request to {message.TargetEndPoint}");
-        await StartHolePunchAsync(sessionId, message.Conv, IPEndPoint.Parse(message.TargetEndPoint), allowRelayFallback: _options.Role == PeerConnectionRole.Extranet);
+        IPEndPoint? targetEp = null;
+        if (!string.IsNullOrWhiteSpace(message.TargetEndPoint) && IPEndPoint.TryParse(message.TargetEndPoint, out var parsedEp))
+        {
+            targetEp = parsedEp;
+        }
+
+        IPEndPoint? targetEpV6 = null;
+        if (!string.IsNullOrWhiteSpace(message.TargetEndPointV6) && IPEndPoint.TryParse(message.TargetEndPointV6, out var parsedEpV6))
+        {
+            targetEpV6 = parsedEpV6;
+        }
+
+        var displayTarget = targetEpV6 != null ? $"{targetEp} / {targetEpV6}" : targetEp?.ToString() ?? string.Empty;
+        OnStatusChanged?.Invoke($"Hole punch request to {displayTarget}");
+        
+        await StartHolePunchAsync(sessionId, message.Conv, targetEp, targetEpV6, allowRelayFallback: _options.Role == PeerConnectionRole.Extranet);
     }
 
-    private async Task StartHolePunchAsync(string sessionId, uint conv, IPEndPoint targetEndPoint, bool allowRelayFallback)
+    private async Task StartHolePunchAsync(string sessionId, uint conv, IPEndPoint? targetEndPoint, IPEndPoint? targetEndPointV6, bool allowRelayFallback)
     {
         if (GetSession(sessionId).Mode == PeerTransportMode.P2pDirect)
         {
@@ -378,7 +438,16 @@ public sealed class ConnectionNegotiator : IDisposable
         }
 
         _isHolePunching = true;
-        _pendingPunches[targetEndPoint.Address.ToString()] = new PendingPunch(sessionId, conv);
+        
+        if (targetEndPoint != null)
+        {
+            _pendingPunches[targetEndPoint.Address.ToString()] = new PendingPunch(sessionId, conv);
+        }
+        if (targetEndPointV6 != null)
+        {
+            _pendingPunches[targetEndPointV6.Address.ToString()] = new PendingPunch(sessionId, conv);
+        }
+        
         OnModeChanged?.Invoke(PeerTransportMode.None);
         OnStatusChanged?.Invoke("State: HolePunching");
 
@@ -396,7 +465,14 @@ public sealed class ConnectionNegotiator : IDisposable
             });
         }
 
-        await _holePuncher!.StartPunchingAsync(targetEndPoint, 200, _options.HolePunchTimeoutMs);
+        if (targetEndPoint != null)
+        {
+            await _holePuncher!.StartPunchingAsync(targetEndPoint, targetEndPointV6, 200, _options.HolePunchTimeoutMs);
+        }
+        else if (targetEndPointV6 != null)
+        {
+            await _holePuncher!.StartPunchingAsync(targetEndPointV6, null, 200, _options.HolePunchTimeoutMs);
+        }
     }
 
     private void ConfigureHolePuncherEvents()

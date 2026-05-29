@@ -29,7 +29,16 @@ public class UdpHolePuncher : IDisposable
     
     public UdpHolePuncher(int port = 0, string localId = "")
     {
-        _udpClient = new UdpClient(port);
+        try
+        {
+            _udpClient = new UdpClient(AddressFamily.InterNetworkV6);
+            _udpClient.Client.DualMode = true;
+            _udpClient.Client.Bind(new IPEndPoint(IPAddress.IPv6Any, port));
+        }
+        catch
+        {
+            _udpClient = new UdpClient(port);
+        }
         _localId = localId;
         _cts = new CancellationTokenSource();
     }
@@ -49,22 +58,48 @@ public class UdpHolePuncher : IDisposable
     /// <summary>
     /// 开始打洞（主动方）
     /// </summary>
-    public async Task StartPunchingAsync(IPEndPoint remoteEp, int intervalMs = 200, int timeoutMs = 10000)
+    public async Task StartPunchingAsync(IPEndPoint remoteEp, IPEndPoint? remoteEpV6 = null, int intervalMs = 200, int timeoutMs = 10000)
     {
-        _remoteEndPoint = remoteEp;
+        _remoteEndPoint = remoteEpV6 ?? remoteEp;
         StartReceivePump();
         var startTime = DateTime.UtcNow;
         var remoteKey = remoteEp.ToString();
+        var remoteKeyV6 = remoteEpV6?.ToString();
 
-        while (!_punchedEndpoints.ContainsKey(remoteKey) && (DateTime.UtcNow - startTime).TotalMilliseconds < timeoutMs)
+        while (true)
         {
+            if (_punchedEndpoints.ContainsKey(remoteKey))
+            {
+                break;
+            }
+            if (remoteKeyV6 != null && _punchedEndpoints.ContainsKey(remoteKeyV6))
+            {
+                break;
+            }
+            if ((DateTime.UtcNow - startTime).TotalMilliseconds >= timeoutMs)
+            {
+                break;
+            }
+
             try
             {
                 // 发送打洞包
                 var punchData = Encoding.UTF8.GetBytes($"PUNCH:{_localId}:{DateTime.UtcNow.Ticks}");
+                
+                if (remoteEpV6 != null)
+                {
+                    await _udpClient.SendAsync(punchData, punchData.Length, remoteEpV6);
+                    // 给 IPv6 分配 30ms 的打洞领先权 (Happy Eyeballs 延迟偏好)
+                    await Task.Delay(30, _cts.Token);
+                }
+                
                 await _udpClient.SendAsync(punchData, punchData.Length, remoteEp);
                 
-                await Task.Delay(intervalMs, _cts.Token);
+                var delay = intervalMs - (remoteEpV6 != null ? 30 : 0);
+                if (delay > 0)
+                {
+                    await Task.Delay(delay, _cts.Token);
+                }
             }
             catch (OperationCanceledException)
             {
@@ -76,7 +111,7 @@ public class UdpHolePuncher : IDisposable
             }
         }
         
-        if (!_punchedEndpoints.ContainsKey(remoteKey))
+        if (!_punchedEndpoints.ContainsKey(remoteKey) && (remoteKeyV6 == null || !_punchedEndpoints.ContainsKey(remoteKeyV6)))
         {
             OnError?.Invoke("Hole punching timeout");
         }
@@ -405,7 +440,15 @@ public class SignalingServer : IDisposable
     
     public SignalingServer(int port)
     {
-        _listener = new TcpListener(IPAddress.Any, port);
+        try
+        {
+            _listener = new TcpListener(IPAddress.IPv6Any, port);
+            _listener.Server.DualMode = true;
+        }
+        catch
+        {
+            _listener = new TcpListener(IPAddress.Any, port);
+        }
         _cts = new CancellationTokenSource();
     }
     

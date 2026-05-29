@@ -65,6 +65,9 @@ public class RegisterMessage : BaseMessage
 
     [JsonPropertyName("public_ep")]
     public string? PublicEndPoint { get; set; }
+
+    [JsonPropertyName("public_ep_v6")]
+    public string? PublicEndPointV6 { get; set; }
 }
 
 /// <summary>
@@ -93,6 +96,9 @@ public class ConnectRequest : BaseMessage
     
     [JsonPropertyName("client_ep")]
     public string? ClientEndPoint { get; set; }
+
+    [JsonPropertyName("client_ep_v6")]
+    public string? ClientEndPointV6 { get; set; }
 }
 
 /// <summary>
@@ -107,9 +113,15 @@ public class ConnectReady : BaseMessage
     
     [JsonPropertyName("intranet_ep")]
     public string IntranetEndPoint { get; set; } = string.Empty;
+
+    [JsonPropertyName("intranet_ep_v6")]
+    public string? IntranetEndPointV6 { get; set; }
     
     [JsonPropertyName("extranet_ep")]
     public string ExtranetEndPoint { get; set; } = string.Empty;
+
+    [JsonPropertyName("extranet_ep_v6")]
+    public string? ExtranetEndPointV6 { get; set; }
     
     [JsonPropertyName("relay_available")]
     public bool RelayAvailable { get; set; }
@@ -127,6 +139,9 @@ public class HolePunchStart : BaseMessage
     
     [JsonPropertyName("target_ep")]
     public string TargetEndPoint { get; set; } = string.Empty;
+
+    [JsonPropertyName("target_ep_v6")]
+    public string? TargetEndPointV6 { get; set; }
     
     [JsonPropertyName("is_initiator")]
     public bool IsInitiator { get; set; }

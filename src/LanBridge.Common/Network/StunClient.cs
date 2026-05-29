@@ -10,12 +10,10 @@ public static class StunClient
 {
     public static async Task<StunBindingResult> QueryAsync(
         UdpHolePuncher socket,
-        string host,
-        int port,
+        IPEndPoint serverEndPoint,
         int timeoutMs = 3000,
         bool changePort = false)
     {
-        var serverEndPoint = await ResolveServerAsync(host, port);
         var transactionId = Guid.NewGuid().ToByteArray().AsSpan(0, 12).ToArray();
         var request = StunProtocol.CreateBindingRequest(changePort: changePort, transactionId: transactionId);
 
@@ -40,14 +38,49 @@ public static class StunClient
         }
         catch (OperationCanceledException)
         {
-            throw new TimeoutException($"STUN query to {host}:{port} timed out after {timeoutMs}ms");
+            throw new TimeoutException($"STUN query to {serverEndPoint} timed out after {timeoutMs}ms");
         }
         finally
         {
             socket.UnregisterStunRequest(transactionId);
         }
 
-        throw new Exception($"Failed to parse STUN response from {host}:{port}");
+        throw new Exception($"Failed to parse STUN response from {serverEndPoint}");
+    }
+
+    public static async Task<StunBindingResult> QueryAsync(
+        UdpHolePuncher socket,
+        string host,
+        int port,
+        int timeoutMs = 3000,
+        bool changePort = false)
+    {
+        var addresses = await Dns.GetHostAddressesAsync(host);
+        var ip = addresses.FirstOrDefault(a => a.AddressFamily == AddressFamily.InterNetwork) ?? addresses[0];
+        return await QueryAsync(socket, new IPEndPoint(ip, port), timeoutMs, changePort);
+    }
+
+    public static async Task<IPEndPoint?> QueryPublicEndPointV6Async(
+        UdpHolePuncher socket,
+        string host,
+        int port,
+        int timeoutMs = 2000)
+    {
+        var serverEndPoint = await ResolveServerAsync(host, port, AddressFamily.InterNetworkV6);
+        if (serverEndPoint == null)
+        {
+            return null;
+        }
+
+        try
+        {
+            var result = await QueryAsync(socket, serverEndPoint, timeoutMs);
+            return result.PublicEndPoint;
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     public static async Task<NatDetectionResult> DetectNatAsync(
@@ -126,16 +159,17 @@ public static class StunClient
         }
     }
 
-    private static async Task<IPEndPoint> ResolveServerAsync(string host, int port)
+    private static async Task<IPEndPoint?> ResolveServerAsync(string host, int port, AddressFamily family)
     {
-        var addresses = await Dns.GetHostAddressesAsync(host);
-        if (addresses.Length == 0)
+        try
         {
-            throw new Exception($"Cannot resolve STUN server: {host}");
+            var addresses = await Dns.GetHostAddressesAsync(host);
+            var address = addresses.FirstOrDefault(a => a.AddressFamily == family);
+            return address != null ? new IPEndPoint(address, port) : null;
         }
-
-        var address = addresses.FirstOrDefault(a => a.AddressFamily == AddressFamily.InterNetwork)
-                      ?? addresses[0];
-        return new IPEndPoint(address, port);
+        catch
+        {
+            return null;
+        }
     }
 }

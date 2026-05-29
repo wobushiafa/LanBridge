@@ -32,43 +32,43 @@
 
 ```mermaid
 flowchart TB
-    subgraph Extranet ["外网客户端 (ExtranetPeer)"]
+    subgraph Extranet ["外网客户端 ExtranetPeer"]
         LocalTCP["TCP 代理监听器"]
         LocalUDP["UDP 代理监听器"]
-        ExtSession["会话流分发器 (StreamId)"]
+        ExtSession["会话流分发器 StreamId"]
     end
 
     subgraph Internet ["公网基础设施"]
-        Server["LanBridge.SignalingServer<br/>(信令 / STUN / Relay 中继)"]
+        Server["LanBridge.SignalingServer - 信令 / STUN / Relay 中继"]
     end
 
-    subgraph Intranet ["内网端 (IntranetPeer)"]
-        IntSession["并发状态管理器<br/>(Task-based Dict)"]
+    subgraph Intranet ["内网端 IntranetPeer"]
+        IntSession["并发状态管理器 Task-based Dict"]
         TargetRouter["双向转发模块"]
     end
 
     subgraph LAN ["内网局域网设备"]
-        HTTP["HTTP (80/8080)"]
-        RTSP["RTSP/RTP Stream"]
+        HTTP["HTTP 80 / 8080"]
+        RTSP["RTSP / RTP Stream"]
         Game["UDP 游戏服务器"]
     end
 
     %% 信令连接
     LocalTCP --> ExtSession
     LocalUDP --> ExtSession
-    ExtSession -- "双向信令交互" --> Server
-    IntSession -- "双向信令注册" --> Server
+    ExtSession -->|双向信令交互| Server
+    IntSession -->|双向信令注册| Server
 
     %% 穿透与回退链路
-    ExtSession -. "⚡ P2P UDP 直连打洞 (KCP 1024 窗口)" .-> IntSession
-    ExtSession == "🛡️ Relay Fallback 极速中继" ==> Server
+    ExtSession -.->|⚡ P2P UDP 直连打洞 - KCP 1024 窗口| IntSession
+    ExtSession ==>|🛡️ Relay Fallback 极速中继| Server
     Server ==> IntSession
 
     %% 局域网分发
     IntSession --> TargetRouter
-    TargetRouter -- "TCP 转发" --> HTTP
-    TargetRouter -- "TCP / UDP 转发" --> RTSP
-    TargetRouter -- "UDP 转发" --> Game
+    TargetRouter -->|TCP 转发| HTTP
+    TargetRouter -->|TCP / UDP 转发| RTSP
+    TargetRouter -->|UDP 转发| Game
 
     classDef peer fill:#1e293b,stroke:#3b82f6,stroke-width:2px,color:#f8fafc;
     classDef server fill:#1e1b4b,stroke:#818cf8,stroke-width:2px,color:#f8fafc;

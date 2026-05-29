@@ -28,6 +28,7 @@ public class NodeInfo
     public string NodeId { get; set; } = string.Empty;
     public string ClientId { get; set; } = string.Empty;
     public IPEndPoint? PublicEndPoint { get; set; }
+    public IPEndPoint? PublicEndPointV6 { get; set; }
     public DateTime LastSeen { get; set; }
     public bool IsIntranet { get; set; }
 }
@@ -60,14 +61,29 @@ public class StunService : IDisposable
     
     public event Action<string, IPEndPoint>? OnStunRequest;
     
+    private static UdpClient CreateDualStackUdpClient(int port)
+    {
+        try
+        {
+            var client = new UdpClient(AddressFamily.InterNetworkV6);
+            client.Client.DualMode = true;
+            client.Client.Bind(new IPEndPoint(IPAddress.IPv6Any, port));
+            return client;
+        }
+        catch
+        {
+            return new UdpClient(port);
+        }
+    }
+    
     public StunService(int primaryPort, int alternatePort = 0)
     {
         _primaryPort = primaryPort;
         _alternatePort = alternatePort;
-        _primaryClient = new UdpClient(primaryPort);
+        _primaryClient = CreateDualStackUdpClient(primaryPort);
         if (alternatePort > 0 && alternatePort != primaryPort)
         {
-            _alternateClient = new UdpClient(alternatePort);
+            _alternateClient = CreateDualStackUdpClient(alternatePort);
         }
         _cts = new CancellationTokenSource();
     }
@@ -75,10 +91,10 @@ public class StunService : IDisposable
     public async Task StartAsync()
     {
         _isRunning = true;
-        Console.WriteLine($"[STUN] Listening on UDP port {_primaryPort}");
+        Console.WriteLine($"[STUN] Listening on UDP port {_primaryPort} (dual-stack)");
         if (_alternateClient != null)
         {
-            Console.WriteLine($"[STUN] Alternate listening on UDP port {_alternatePort}");
+            Console.WriteLine($"[STUN] Alternate listening on UDP port {_alternatePort} (dual-stack)");
         }
 
         var primaryLoop = ReceiveLoopAsync(_primaryClient, _alternateClient);
@@ -296,11 +312,19 @@ public class SignalingService : IDisposable
             publicEndPoint = registeredEndPoint;
         }
 
+        IPEndPoint? publicEndPointV6 = null;
+        if (!string.IsNullOrWhiteSpace(message.PublicEndPointV6) &&
+            IPEndPoint.TryParse(message.PublicEndPointV6, out var registeredEndPointV6))
+        {
+            publicEndPointV6 = registeredEndPointV6;
+        }
+
         var nodeInfo = new NodeInfo
         {
             NodeId = message.NodeId,
             ClientId = clientId,
             PublicEndPoint = publicEndPoint,
+            PublicEndPointV6 = publicEndPointV6,
             LastSeen = DateTime.UtcNow,
             IsIntranet = true
         };
@@ -315,7 +339,7 @@ public class SignalingService : IDisposable
         };
         
         await SendToClientAsync(clientId, ack);
-        Console.WriteLine($"[Signaling] Node registered: {message.NodeId}");
+        Console.WriteLine($"[Signaling] Node registered: {message.NodeId} (IPv4={publicEndPoint}, IPv6={publicEndPointV6})");
     }
     
     private async Task HandleConnectRequestAsync(string clientId, ConnectRequest message)
@@ -338,7 +362,15 @@ public class SignalingService : IDisposable
             requestEndPoint = parsedRequestEndPoint;
         }
 
-        if (targetNode.PublicEndPoint == null || requestEndPoint == null)
+        IPEndPoint? requestEndPointV6 = null;
+        if (!string.IsNullOrWhiteSpace(message.ClientEndPointV6) &&
+            IPEndPoint.TryParse(message.ClientEndPointV6, out var parsedRequestEndPointV6))
+        {
+            requestEndPointV6 = parsedRequestEndPointV6;
+        }
+
+        if ((targetNode.PublicEndPoint == null && targetNode.PublicEndPointV6 == null) ||
+            (requestEndPoint == null && requestEndPointV6 == null))
         {
             var error = new ErrorMessage
             {
@@ -356,7 +388,8 @@ public class SignalingService : IDisposable
         var holePunchStart = new HolePunchStart
         {
             SessionId = sessionId,
-            TargetEndPoint = requestEndPoint.ToString(),
+            TargetEndPoint = requestEndPoint?.ToString() ?? string.Empty,
+            TargetEndPointV6 = requestEndPointV6?.ToString(),
             IsInitiator = true,
             Conv = conv
         };
@@ -366,8 +399,10 @@ public class SignalingService : IDisposable
         var connectReady = new ConnectReady
         {
             SessionId = sessionId,
-            IntranetEndPoint = targetNode.PublicEndPoint.ToString(),
-            ExtranetEndPoint = requestEndPoint.ToString(),
+            IntranetEndPoint = targetNode.PublicEndPoint?.ToString() ?? string.Empty,
+            IntranetEndPointV6 = targetNode.PublicEndPointV6?.ToString(),
+            ExtranetEndPoint = requestEndPoint?.ToString() ?? string.Empty,
+            ExtranetEndPointV6 = requestEndPointV6?.ToString(),
             RelayAvailable = true,
             Conv = conv
         };
