@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
+using System.Threading;
 using LanBridge.Common.Kcp;
+using LanBridge.Common.Network;
 
 namespace LanBridge.KcpTest;
 
@@ -39,6 +41,9 @@ class Program
 
         // 输出可视化比对表
         PrintComparisonReport(resultLegacy, resultOptimized, resultAdaptive, transferSize);
+
+        // 运行 LAN 自动发现与本地直连测试
+        RunLanDiscoveryTest();
     }
 
     private sealed class SimulationResult
@@ -287,6 +292,87 @@ class Program
         }
 
         Console.WriteLine("  [Pass] MessageJsonContext AOT serialization verified.");
+    }
+
+    private static void RunLanDiscoveryTest()
+    {
+        Console.WriteLine();
+        Console.ForegroundColor = ConsoleColor.Magenta;
+        Console.WriteLine("======================================================================");
+        Console.WriteLine("        LAN Auto-Discovery & Zero-Config Local Direct Connection      ");
+        Console.WriteLine("======================================================================");
+        Console.ResetColor();
+
+        // 1. Create intranet peer options (Signaling and STUN ports pointing to dummy addresses to guarantee no public path)
+        var intranetOptions = new PeerConnectionOptions
+        {
+            Role = PeerConnectionRole.Intranet,
+            NodeId = "intranet-peer-test",
+            SignalingServerHost = "127.0.0.1",
+            SignalingServerPort = 9898,
+            StunServerHost = "127.0.0.1",
+            StunServerPort = 9899,
+            UdpPort = 0,
+            Verbose = true
+        };
+
+        // 2. Create extranet peer options
+        var extranetOptions = new PeerConnectionOptions
+        {
+            Role = PeerConnectionRole.Extranet,
+            NodeId = "extranet-client-test",
+            TargetNodeId = "intranet-peer-test",
+            SignalingServerHost = "127.0.0.1",
+            SignalingServerPort = 9898,
+            StunServerHost = "127.0.0.1",
+            StunServerPort = 9899,
+            UdpPort = 0,
+            Verbose = true
+        };
+
+        using var intranetNegotiator = new ConnectionNegotiator(intranetOptions);
+        using var extranetNegotiator = new ConnectionNegotiator(extranetOptions);
+
+        intranetNegotiator.OnStatusChanged += status => Console.WriteLine($"[Intranet] {status}");
+        extranetNegotiator.OnStatusChanged += status => Console.WriteLine($"[Extranet] {status}");
+
+        Console.WriteLine("[Test] Starting Intranet Peer (LAN discovery listener active)...");
+        _ = intranetNegotiator.StartAsync();
+
+        // Sleep slightly to let Intranet Peer bind and listen on discovery port
+        Thread.Sleep(200);
+
+        Console.WriteLine("[Test] Starting Extranet Peer (Broadcasting local LAN queries)...");
+        _ = extranetNegotiator.StartAsync();
+
+        // Wait to see if they connect directly via LAN auto-discovery
+        Console.WriteLine("[Test] Awaiting LAN direct auto-discovery & KCP session binding...");
+        bool connected = false;
+        for (int i = 0; i < 20; i++)
+        {
+            Thread.Sleep(100);
+            if (intranetNegotiator.IsConnected && extranetNegotiator.IsConnected)
+            {
+                connected = true;
+                break;
+            }
+        }
+
+        Console.WriteLine();
+        if (connected)
+        {
+            Console.ForegroundColor = ConsoleColor.Green;
+            Console.WriteLine("[SUCCESS] LAN Auto-Discovery & Zero-Config Local Direct Connection succeeded!");
+            Console.WriteLine($"[SUCCESS] Transport Mode resolved to: {extranetNegotiator.Mode}");
+            Console.ResetColor();
+        }
+        else
+        {
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.WriteLine("[FAILURE] LAN Auto-Discovery timed out or local connection failed.");
+            Console.ResetColor();
+        }
+        Console.WriteLine("======================================================================");
         Console.WriteLine();
     }
 }

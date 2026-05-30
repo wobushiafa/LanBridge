@@ -22,6 +22,7 @@ public class UdpHolePuncher : IDisposable
     private Task? _receivePumpTask;
     
     public event Action<IPEndPoint>? OnHolePunched;
+    public event Action<IPEndPoint, uint>? OnLanAdvertised;
     public event Action<string>? OnError;
     public event Action<byte[], int, IPEndPoint>? OnUnreliableDataReceived;
     
@@ -258,6 +259,17 @@ public class UdpHolePuncher : IDisposable
             return;
         }
 
+        if (message.StartsWith("LB_ADVERTISE:", StringComparison.Ordinal))
+        {
+            var parts = message.Split(':');
+            if (parts.Length == 4 && int.TryParse(parts[2], out var targetPort) && uint.TryParse(parts[3], out var conv))
+            {
+                var targetEp = new IPEndPoint(result.RemoteEndPoint.Address, targetPort);
+                OnLanAdvertised?.Invoke(targetEp, conv);
+            }
+            return;
+        }
+
         if (message.StartsWith("PUNCH:"))
         {
             _remoteEndPoint = result.RemoteEndPoint;
@@ -285,6 +297,12 @@ public class UdpHolePuncher : IDisposable
     public void RemovePunchedEndpoint(IPEndPoint remoteEndPoint)
     {
         _punchedEndpoints.TryRemove(remoteEndPoint.ToString(), out _);
+    }
+
+    public void TriggerHolePunched(IPEndPoint remoteEndPoint, uint conv)
+    {
+        _remoteEndPoint = remoteEndPoint;
+        MarkPunched(remoteEndPoint);
     }
     
     /// <summary>

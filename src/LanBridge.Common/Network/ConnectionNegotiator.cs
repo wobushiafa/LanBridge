@@ -38,6 +38,7 @@ public sealed class ConnectionNegotiator : IDisposable
     private readonly SemaphoreSlim _connectionRequestLock = new(1, 1);
     private SignalingClient? _signalingClient;
     private UdpHolePuncher? _holePuncher;
+    private LanDiscoveryService? _lanDiscovery;
     private IPEndPoint? _publicEndPoint;
     private IPEndPoint? _publicEndPointV6;
     private NatDetectionResult? _natDetection;
@@ -65,10 +66,58 @@ public sealed class ConnectionNegotiator : IDisposable
 
     private sealed record PendingPunch(string SessionId, uint Conv);
 
+    public void RaiseStatusChanged(string status)
+    {
+        OnStatusChanged?.Invoke(status);
+    }
+
+    public async Task HandleLanDiscoveryRequestAsync(IPEndPoint clientEndPoint, uint conv)
+    {
+        var sessionId = _activeSessionId;
+        
+        // Register the client in pending punches so it gets picked up by MarkPunched
+        _pendingPunches[clientEndPoint.Address.ToString()] = new PendingPunch(sessionId, conv);
+        
+        if (_holePuncher != null)
+        {
+            OnStatusChanged?.Invoke($"[LAN Discovery] Received local query from {clientEndPoint}. Replying advertisement & establishing direct KCP session...");
+            
+            // Reply with unicast advertisement containing target server port
+            var serverPort = _holePuncher.LocalEndPoint?.Port ?? 0;
+            var advertiseMessage = $"LB_ADVERTISE:{_options.NodeId}:{serverPort}:{conv}";
+            var data = Encoding.UTF8.GetBytes(advertiseMessage);
+            await _holePuncher.SendAsync(data, data.Length, clientEndPoint);
+            
+            // Directly trigger punch completion!
+            _holePuncher.TriggerHolePunched(clientEndPoint, conv);
+        }
+    }
+
     public async Task StartAsync()
     {
         _holePuncher = new UdpHolePuncher(_options.UdpPort, _options.NodeId);
         ConfigureHolePuncherEvents();
+
+        // Start LAN Discovery Service to scan and respond to local subnets
+        _lanDiscovery = new LanDiscoveryService(_options.NodeId, this, _options.Verbose);
+        _lanDiscovery.Start();
+
+        if (_options.Role == PeerConnectionRole.Extranet)
+        {
+            // Initiate parallel local LAN discovery broadcast/multicast queries
+            var clientPort = _holePuncher.LocalEndPoint?.Port ?? 0;
+            var tempConv = (uint)Random.Shared.Next(100000, 99999999);
+            _ = Task.Run(async () =>
+            {
+                // Send query 3 times with 100ms interval for maximum packet delivery likelihood in LAN
+                for (int i = 0; i < 3; i++)
+                {
+                    if (IsConnected) break;
+                    await _lanDiscovery.BroadcastQueryAsync(_options.TargetNodeId, clientPort, tempConv);
+                    await Task.Delay(100);
+                }
+            });
+        }
 
         await DetectNatAsync();
         await ConnectToSignalingServerAsync();
@@ -228,6 +277,11 @@ public sealed class ConnectionNegotiator : IDisposable
 
     public async Task RequestConnectionAsync(bool force = false)
     {
+        if (IsConnected)
+        {
+            return;
+        }
+
         if (_options.Role != PeerConnectionRole.Extranet)
         {
             return;
@@ -442,6 +496,11 @@ public sealed class ConnectionNegotiator : IDisposable
 
     private async Task HandleConnectReadyAsync(ConnectReady message)
     {
+        if (IsConnected)
+        {
+            return;
+        }
+
         var sessionId = string.IsNullOrWhiteSpace(message.SessionId) ? _activeSessionId : message.SessionId;
         _activeSessionId = sessionId;
         
@@ -480,6 +539,11 @@ public sealed class ConnectionNegotiator : IDisposable
 
     private async Task HandleHolePunchStartAsync(HolePunchStart message)
     {
+        if (IsConnected)
+        {
+            return;
+        }
+
         var sessionId = string.IsNullOrWhiteSpace(message.SessionId) ? Guid.NewGuid().ToString("N")[..8] : message.SessionId;
         if (string.IsNullOrWhiteSpace(message.TargetEndPoint) && string.IsNullOrWhiteSpace(message.TargetEndPointV6))
         {
@@ -585,6 +649,19 @@ public sealed class ConnectionNegotiator : IDisposable
             {
                 OnModeChanged?.Invoke(PeerTransportMode.P2pDirect);
             }
+        };
+
+        _holePuncher.OnLanAdvertised += (endpoint, conv) =>
+        {
+            if (IsConnected) return;
+
+            OnStatusChanged?.Invoke($"[LAN Discovery] Discovered local peer at {endpoint}, conv={conv}. Direct-connecting...");
+            _isHolePunching = false;
+
+            var sessionId = _activeSessionId;
+            _pendingPunches[endpoint.Address.ToString()] = new PendingPunch(sessionId, conv);
+
+            _holePuncher.TriggerHolePunched(endpoint, conv);
         };
 
         _holePuncher.OnError += error =>
@@ -738,6 +815,7 @@ public sealed class ConnectionNegotiator : IDisposable
         _relayProbeCts?.Dispose();
         _signalingClient?.Dispose();
         _holePuncher?.Dispose();
+        _lanDiscovery?.Dispose();
         foreach (var session in _sessions.Values)
         {
             session.Dispose();
