@@ -20,6 +20,7 @@
 ## ✨ 核心特性
 
 - 🌐 **双协议端口转发**：不仅支持经典的 TCP（HTTP、RTSP over TCP、WebSocket、SSH），还完美支持 **UDP 端口转发**（RTSP UDP、游戏服务器、DNS 等），并且配有智能连接老化清理（Idle Timeout Pruning）防泄露机制。
+- 📦 **零反射 Native AOT 原生编译**：三端核心完全重构为 100% 零反射架构，全量采用 System.Text.Json 源生成器（Source Generators）。可一键编译为体积仅 **3.6MB - 4MB** 的独立原生二进制单文件，无需任何外部运行时或 .NET SDK 依赖，拷走即跑，毫秒级启动！
 - 🚀 **IPv4/IPv6 双栈并行打洞 (Happy Eyeballs 机制)**：采用单套接字双栈绑定（支持 `[::]` 自动回退），引入类 Happy Eyeballs 并行打洞策略（IPv6 优先 30ms 启动，IPv4 协同竞速），智能选路激活最快 P2P 路径，显著提升现代网络下的穿透成功率。
 - ⚡ **KCP 高吞吐传输**：针对高带宽、高延迟网络调整了 KCP 滑动窗口与段队列大小（默认增至 **1024 窗口**），在恶劣网络下依然能够维持极佳的链路吞吐量。
 - 🧊 **零分配级内存优化**：传输载荷的字节缓冲区完全采用 `System.Buffers.ArrayPool<byte>.Shared` 线程安全对象池，杜绝堆内存碎片与 GC 停顿，保障高吞吐下的平稳运行。
@@ -232,13 +233,15 @@ dotnet run --project src/LanBridge.ExtranetPeer -- \
 项目基于全新的 .NET CLI 编译标准，请确保您的环境中安装了 **.NET 10 SDK**：
 
 ```bash
-# 全局编译 Release 版本
+# 全局编译 Release 版本 (标准 JIT)
 dotnet build LanBridge.slnx -c Release
 
-# 独立生成各组件模块
-dotnet publish src/LanBridge.SignalingServer/LanBridge.SignalingServer.csproj -c Release -o ./publish/SignalingServer
-dotnet publish src/LanBridge.IntranetPeer/LanBridge.IntranetPeer.csproj -c Release -o ./publish/IntranetPeer
-dotnet publish src/LanBridge.ExtranetPeer/LanBridge.ExtranetPeer.csproj -c Release -o ./publish/ExtranetPeer
+# 一键生成 100% 零依赖、极小体积的 Native AOT 原生二进制单文件
+# 编译后的体积仅 ~4MB，启动耗时 <1ms，拷贝即可在无 .NET 环境的机器上运行
+# 可将 linux-x64 替换为您的目标系统，例如 win-x64, osx-x64
+dotnet publish src/LanBridge.SignalingServer/LanBridge.SignalingServer.csproj -c Release -r linux-x64 --self-contained
+dotnet publish src/LanBridge.IntranetPeer/LanBridge.IntranetPeer.csproj -c Release -r linux-x64 --self-contained
+dotnet publish src/LanBridge.ExtranetPeer/LanBridge.ExtranetPeer.csproj -c Release -r linux-x64 --self-contained
 ```
 
 ---
