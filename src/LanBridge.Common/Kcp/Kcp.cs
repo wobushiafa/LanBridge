@@ -53,6 +53,12 @@ public class Kcp : IDisposable
     private uint _fastlimit = 5;
     private long _nocwnd;
     
+    // Adaptive congestion control and RTT stats
+    private uint _rttMin = uint.MaxValue;
+    private uint _rttMax = 0;
+    private bool _useAdaptiveCongestion = true;
+    private bool _enableLegacyMode = false;
+    
     // 队列
     private readonly Queue<KcpSegment> _sndQueue = new();
     private readonly Queue<KcpSegment> _rcvQueue = new();
@@ -78,6 +84,22 @@ public class Kcp : IDisposable
     public uint Cwnd => _cwnd;
     public uint SndQueueCount => (uint)_sndQueue.Count;
     public uint RcvQueueCount => (uint)_rcvQueue.Count;
+    
+    public uint Srtt => _rxSrtt;
+    public uint Rttvar => _rxRttvar;
+    public uint Rto => _rxRto;
+    
+    public bool UseAdaptiveCongestion
+    {
+        get => _useAdaptiveCongestion;
+        set => _useAdaptiveCongestion = value;
+    }
+    
+    public bool EnableLegacyMode
+    {
+        get => _enableLegacyMode;
+        set => _enableLegacyMode = value;
+    }
     
     public Kcp(uint conv, Action<byte[], int, IPEndPoint> output, IPEndPoint? remoteEp = null)
     {
@@ -244,6 +266,8 @@ public class Kcp : IDisposable
         
         uint maxUna = _sndUna + _sndWnd;
         int flag = 0;
+        uint maxAck = 0;
+        uint latestTs = 0;
         int offsetOld = offset;
         
         while (true)
@@ -287,12 +311,26 @@ public class Kcp : IDisposable
             switch (seg.Cmd)
             {
                 case KcpSegment.CmdAck:
+                    int rtt = TimeDiff(_current, seg.Ts);
+                    if (rtt >= 0)
+                    {
+                        UpdateAck(rtt);
+                        if ((uint)rtt < _rttMin) _rttMin = (uint)rtt;
+                        if ((uint)rtt > _rttMax) _rttMax = (uint)rtt;
+                    }
                     ParseAck(seg.Sn);
                     ShrinkBuf();
                     if (flag == 0)
                     {
                         flag = 1;
                         _tsRecent = seg.Ts;
+                        maxAck = seg.Sn;
+                        latestTs = seg.Ts;
+                    }
+                    else if (TimeDiff(seg.Sn, maxAck) > 0)
+                    {
+                        maxAck = seg.Sn;
+                        latestTs = seg.Ts;
                     }
                     seg.Free();
                     break;
@@ -332,6 +370,11 @@ public class Kcp : IDisposable
                     seg.Free();
                     return -1;
             }
+        }
+        
+        if (flag != 0)
+        {
+            ParseFastack(maxAck);
         }
         
         return offset - offsetOld;
@@ -533,6 +576,9 @@ public class Kcp : IDisposable
         uint resent = _fastresend > 0 ? _fastresend : 0xffffffff;
         uint rtomin = _nodelay == 0 ? (_rxRto >> 3) : 0;
         
+        bool lost = false;
+        bool change = false;
+        
         for (int i = 0; i < _sndBuf.Count; i++)
         {
             var seg = _sndBuf[i];
@@ -557,7 +603,7 @@ public class Kcp : IDisposable
                 else
                     seg.Rto += _rxRto / 2;
 
-                OnPacketLoss();
+                lost = true;
                 
                 seg.Resendts = _current + seg.Rto;
                 _state = 0; // 重置状态
@@ -569,7 +615,7 @@ public class Kcp : IDisposable
                 seg.Xmit++;
                 seg.Fastack = 0;
                 seg.Resendts = _current + seg.Rto;
-                OnPacketLoss();
+                change = true;
             }
             
             if (needsend > 0)
@@ -582,6 +628,53 @@ public class Kcp : IDisposable
                 
                 if (seg.Xmit >= _deadLink)
                     _state = 1; // 连接断开
+            }
+        }
+        
+        // 拥塞窗口决策
+        if (_nocwnd == 0)
+        {
+            if (_enableLegacyMode)
+            {
+                if (lost || change)
+                {
+                    _ssthresh = Math.Max(_cwnd / 2, 2);
+                    _cwnd = 1;
+                }
+            }
+            else
+            {
+                if (lost)
+                {
+                    _ssthresh = Math.Max(_cwnd / 2, 2);
+                    _cwnd = 1;
+                }
+                else if (change)
+                {
+                    uint fastResendVal = _fastresend > 0 ? _fastresend : 2;
+                    if (_useAdaptiveCongestion && _rttMax > _rttMin)
+                    {
+                        double queueDelaySeverity = (double)(_rxSrtt - _rttMin) / (_rttMax - _rttMin);
+                        if (queueDelaySeverity < 0.3)
+                        {
+                            _ssthresh = Math.Max((uint)(_cwnd * 0.8), 2);
+                        }
+                        else
+                        {
+                            _ssthresh = Math.Max(_cwnd / 2, 2);
+                        }
+                    }
+                    else
+                    {
+                        _ssthresh = Math.Max(_cwnd / 2, 2);
+                    }
+                    _cwnd = _ssthresh + fastResendVal;
+                }
+            }
+            
+            if (_cwnd > _rmtWnd)
+            {
+                _cwnd = _rmtWnd;
             }
         }
     }
@@ -753,15 +846,51 @@ public class Kcp : IDisposable
         }
     }
 
-    private void OnPacketLoss()
+    private void UpdateAck(int rtt)
     {
-        if (_nocwnd != 0)
+        if (_enableLegacyMode)
         {
             return;
         }
+        if (_rxSrtt == 0)
+        {
+            _rxSrtt = (uint)rtt;
+            _rxRttvar = (uint)rtt / 2;
+        }
+        else
+        {
+            int delta = rtt - (int)_rxSrtt;
+            if (delta < 0) delta = -delta;
+            _rxRttvar = (3 * _rxRttvar + (uint)delta) / 4;
+            _rxSrtt = (7 * _rxSrtt + (uint)rtt) / 8;
+            if (_rxSrtt < 1) _rxSrtt = 1;
+        }
+        uint rto = _rxSrtt + Math.Max(_interval, 4 * _rxRttvar);
+        
+        uint dynamicMinRto = Math.Clamp(_rxSrtt + 3 * _rxRttvar, _rxMinrto, 300u);
+        _rxRto = Math.Clamp(rto, dynamicMinRto, RtoMax);
+    }
 
-        _ssthresh = Math.Max(_cwnd / 2, 2);
-        _cwnd = 1;
+    private void ParseFastack(uint sn)
+    {
+        if (_enableLegacyMode)
+        {
+            return;
+        }
+        if (TimeDiff(sn, _sndUna) < 0 || TimeDiff(sn, _sndNxt) >= 0)
+            return;
+
+        for (int i = 0; i < _sndBuf.Count; i++)
+        {
+            var seg = _sndBuf[i];
+            if (TimeDiff(sn, seg.Sn) < 0)
+                break;
+            
+            if (sn != seg.Sn)
+            {
+                seg.Fastack++;
+            }
+        }
     }
     
     /// <summary>

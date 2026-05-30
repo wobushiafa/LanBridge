@@ -594,6 +594,9 @@ public sealed record KcpSessionStats(
     uint Mtu,
     uint Mss,
     uint Cwnd,
+    uint Srtt,
+    uint Rttvar,
+    uint Rto,
     int WaitSnd,
     long QueuedMessages,
     long SentPackets,
@@ -661,6 +664,25 @@ public class KcpSession : IDisposable
         _kcp.SetMtu((uint)mtu);
         _kcp.SetNodelay(1, 10, 2, enableCongestionControl ? 0 : 1);
         _kcp.WndSize(1024, 1024);
+        _kcp.UseAdaptiveCongestion = true;
+    }
+
+    public bool UseAdaptiveCongestion
+    {
+        get
+        {
+            lock (_kcpLock)
+            {
+                return _kcp.UseAdaptiveCongestion;
+            }
+        }
+        set
+        {
+            lock (_kcpLock)
+            {
+                _kcp.UseAdaptiveCongestion = value;
+            }
+        }
     }
     
     /// <summary>
@@ -707,6 +729,9 @@ public class KcpSession : IDisposable
                 _kcp.Mtu,
                 _kcp.Mss,
                 _kcp.Cwnd,
+                _kcp.Srtt,
+                _kcp.Rttvar,
+                _kcp.Rto,
                 _kcp.WaitSnd(),
                 Interlocked.Read(ref _queuedMessages),
                 Interlocked.Read(ref _sentPackets),
