@@ -67,8 +67,8 @@ public class UdpHolePuncher : IDisposable
         _remoteEndPoint = remoteEpV6 ?? remoteEp;
         StartReceivePump();
         var startTime = DateTime.UtcNow;
-        var remoteKey = remoteEp.ToString();
-        var remoteKeyV6 = remoteEpV6?.ToString();
+        var remoteKey = NormalizeEndPoint(remoteEp).ToString();
+        var remoteKeyV6 = remoteEpV6 != null ? NormalizeEndPoint(remoteEpV6).ToString() : null;
 
         while (true)
         {
@@ -288,7 +288,7 @@ public class UdpHolePuncher : IDisposable
 
     private void MarkPunched(IPEndPoint remoteEndPoint)
     {
-        if (_punchedEndpoints.TryAdd(remoteEndPoint.ToString(), 0))
+        if (_punchedEndpoints.TryAdd(NormalizeEndPoint(remoteEndPoint).ToString(), 0))
         {
             OnHolePunched?.Invoke(remoteEndPoint);
         }
@@ -296,7 +296,16 @@ public class UdpHolePuncher : IDisposable
 
     public void RemovePunchedEndpoint(IPEndPoint remoteEndPoint)
     {
-        _punchedEndpoints.TryRemove(remoteEndPoint.ToString(), out _);
+        _punchedEndpoints.TryRemove(NormalizeEndPoint(remoteEndPoint).ToString(), out _);
+    }
+
+    private static IPEndPoint NormalizeEndPoint(IPEndPoint endpoint)
+    {
+        if (endpoint.Address.IsIPv4MappedToIPv6)
+        {
+            return new IPEndPoint(endpoint.Address.MapToIPv4(), endpoint.Port);
+        }
+        return endpoint;
     }
 
     public void TriggerHolePunched(IPEndPoint remoteEndPoint, uint conv)
