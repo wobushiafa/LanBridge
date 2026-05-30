@@ -258,9 +258,9 @@ public class ExtranetPeer : IDisposable
                 var sendBuffer = System.Buffers.ArrayPool<byte>.Shared.Rent(payloadLength + 16);
                 try
                 {
-                    TunnelFrame.WriteHeader(sendBuffer, 0, TunnelFrameType.Data, session.StreamId, payloadLength);
+                    TunnelFrame.WriteHeader(sendBuffer, 0, TunnelFrameType.UnreliableData, session.StreamId, payloadLength);
                     Buffer.BlockCopy(data, 0, sendBuffer, 16, payloadLength);
-                    await SendToRemoteAsync(sendBuffer, 0, 16 + payloadLength);
+                    await SendUnreliableToRemoteAsync(sendBuffer, 0, 16 + payloadLength);
                 }
                 finally
                 {
@@ -405,7 +405,7 @@ public class ExtranetPeer : IDisposable
             return;
         }
 
-        if (frame.Type == TunnelFrameType.Data)
+        if (frame.Type == TunnelFrameType.Data || frame.Type == TunnelFrameType.UnreliableData)
         {
             if (_udpSessions.TryGetValue(frame.StreamId, out var udpSession))
             {
@@ -470,6 +470,11 @@ public class ExtranetPeer : IDisposable
     public async Task SendToRemoteAsync(byte[] data, int offset, int length)
     {
         await _connection.SendAsync(data, offset, length);
+    }
+
+    public async Task SendUnreliableToRemoteAsync(byte[] data, int offset, int length)
+    {
+        await _connection.SendUnreliableAsync(data, offset, length);
     }
 
     private void UpdateState(ConnectionState newState)

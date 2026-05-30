@@ -175,6 +175,33 @@ public sealed class ConnectionNegotiator : IDisposable
         await GetSession(sessionId).SendAsync(data, offset, length);
     }
 
+    public async Task SendUnreliableAsync(byte[] data, int offset, int length)
+    {
+        await SendUnreliableAsync(_activeSessionId, data, offset, length);
+    }
+
+    public async Task SendUnreliableAsync(string sessionId, byte[] data, int offset, int length)
+    {
+        var session = GetSession(sessionId);
+        if (session.Mode == PeerTransportMode.P2pDirect && _holePuncher?.RemoteEndPoint != null)
+        {
+            try
+            {
+                await _holePuncher.Client.SendAsync(new ReadOnlyMemory<byte>(data, offset, length), _holePuncher.RemoteEndPoint);
+                return;
+            }
+            catch (Exception ex)
+            {
+                if (_options.Verbose)
+                {
+                    OnStatusChanged?.Invoke($"Unreliable direct send failed: {ex.Message}");
+                }
+            }
+        }
+
+        await session.SendAsync(data, offset, length);
+    }
+
     private PeerTransportSession GetSession(string sessionId)
     {
         return _sessions.GetOrAdd(sessionId, id =>
@@ -223,7 +250,8 @@ public sealed class ConnectionNegotiator : IDisposable
             {
                 TargetNodeId = _options.TargetNodeId,
                 ClientEndPoint = _publicEndPoint?.ToString(),
-                ClientEndPointV6 = _publicEndPointV6?.ToString()
+                ClientEndPointV6 = _publicEndPointV6?.ToString(),
+                NatType = _natDetection?.NatType ?? StunNatType.Unknown
             };
 
             await _signalingClient.SendAsync(MessageSerializer.SerializeToString(request));
@@ -372,7 +400,8 @@ public sealed class ConnectionNegotiator : IDisposable
             NodeId = _options.NodeId,
             Token = _options.Token,
             PublicEndPoint = _publicEndPoint?.ToString(),
-            PublicEndPointV6 = _publicEndPointV6?.ToString()
+            PublicEndPointV6 = _publicEndPointV6?.ToString(),
+            NatType = _natDetection?.NatType ?? StunNatType.Unknown
         };
 
         await _signalingClient!.SendAsync(MessageSerializer.SerializeToString(register));
@@ -446,7 +475,7 @@ public sealed class ConnectionNegotiator : IDisposable
         var displayTarget = targetEpV6 != null ? $"{targetEp} / {targetEpV6}" : targetEp?.ToString() ?? string.Empty;
         OnStatusChanged?.Invoke($"Connection ready. Starting hole punch to {displayTarget}");
         
-        await StartHolePunchAsync(sessionId, message.Conv, targetEp, targetEpV6, allowRelayFallback: _options.Role == PeerConnectionRole.Extranet);
+        await StartHolePunchAsync(sessionId, message.Conv, targetEp, targetEpV6, allowRelayFallback: _options.Role == PeerConnectionRole.Extranet, message.TargetNatType);
     }
 
     private async Task HandleHolePunchStartAsync(HolePunchStart message)
@@ -474,10 +503,10 @@ public sealed class ConnectionNegotiator : IDisposable
         var displayTarget = targetEpV6 != null ? $"{targetEp} / {targetEpV6}" : targetEp?.ToString() ?? string.Empty;
         OnStatusChanged?.Invoke($"Hole punch request to {displayTarget}");
         
-        await StartHolePunchAsync(sessionId, message.Conv, targetEp, targetEpV6, allowRelayFallback: _options.Role == PeerConnectionRole.Extranet);
+        await StartHolePunchAsync(sessionId, message.Conv, targetEp, targetEpV6, allowRelayFallback: _options.Role == PeerConnectionRole.Extranet, message.TargetNatType);
     }
 
-    private async Task StartHolePunchAsync(string sessionId, uint conv, IPEndPoint? targetEndPoint, IPEndPoint? targetEndPointV6, bool allowRelayFallback)
+    private async Task StartHolePunchAsync(string sessionId, uint conv, IPEndPoint? targetEndPoint, IPEndPoint? targetEndPointV6, bool allowRelayFallback, StunNatType targetNatType)
     {
         if (GetSession(sessionId).Mode == PeerTransportMode.P2pDirect)
         {
@@ -512,13 +541,23 @@ public sealed class ConnectionNegotiator : IDisposable
             });
         }
 
+        bool predictPorts = _natDetection != null && 
+                            _natDetection.NatType != StunNatType.Symmetric && 
+                            _natDetection.NatType != StunNatType.Blocked && 
+                            targetNatType == StunNatType.Symmetric;
+
+        if (predictPorts)
+        {
+            OnStatusChanged?.Invoke("Target is Symmetric NAT. Enabling port prediction for hole punching.");
+        }
+
         if (targetEndPoint != null)
         {
-            await _holePuncher!.StartPunchingAsync(targetEndPoint, targetEndPointV6, 200, _options.HolePunchTimeoutMs);
+            await _holePuncher!.StartPunchingAsync(targetEndPoint, targetEndPointV6, 200, _options.HolePunchTimeoutMs, predictPorts);
         }
         else if (targetEndPointV6 != null)
         {
-            await _holePuncher!.StartPunchingAsync(targetEndPointV6, null, 200, _options.HolePunchTimeoutMs);
+            await _holePuncher!.StartPunchingAsync(targetEndPointV6, null, 200, _options.HolePunchTimeoutMs, predictPorts);
         }
     }
 
@@ -554,6 +593,20 @@ public sealed class ConnectionNegotiator : IDisposable
             if (error.Contains("timeout", StringComparison.OrdinalIgnoreCase))
             {
                 OnStatusChanged?.Invoke($"P2P failure reason: {ExplainP2pFailure()}");
+            }
+        };
+
+        _holePuncher.OnUnreliableDataReceived += (buffer, length, endpoint) =>
+        {
+            if (_holePuncher.RemoteEndPoint != null)
+            {
+                var addr1 = endpoint.Address.IsIPv4MappedToIPv6 ? endpoint.Address.MapToIPv4() : endpoint.Address;
+                var addr2 = _holePuncher.RemoteEndPoint.Address.IsIPv4MappedToIPv6 ? _holePuncher.RemoteEndPoint.Address.MapToIPv4() : _holePuncher.RemoteEndPoint.Address;
+                if (addr1.Equals(addr2))
+                {
+                    OnDataReceived?.Invoke(buffer, length);
+                    OnSessionDataReceived?.Invoke(_activeSessionId, buffer, length);
+                }
             }
         };
     }

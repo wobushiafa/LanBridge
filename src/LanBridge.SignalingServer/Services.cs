@@ -4,6 +4,7 @@ using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
 using LanBridge.Common.Protocol;
+using LanBridge.Common.Network;
 
 namespace LanBridge.SignalingServer;
 
@@ -31,6 +32,7 @@ public class NodeInfo
     public IPEndPoint? PublicEndPointV6 { get; set; }
     public DateTime LastSeen { get; set; }
     public bool IsIntranet { get; set; }
+    public StunNatType NatType { get; set; } = StunNatType.Unknown;
 }
 
 /// <summary>
@@ -326,7 +328,8 @@ public class SignalingService : IDisposable
             PublicEndPoint = publicEndPoint,
             PublicEndPointV6 = publicEndPointV6,
             LastSeen = DateTime.UtcNow,
-            IsIntranet = true
+            IsIntranet = true,
+            NatType = message.NatType
         };
         
         _nodes[message.NodeId] = nodeInfo;
@@ -339,7 +342,7 @@ public class SignalingService : IDisposable
         };
         
         await SendToClientAsync(clientId, ack);
-        Console.WriteLine($"[Signaling] Node registered: {message.NodeId} (IPv4={publicEndPoint}, IPv6={publicEndPointV6})");
+        Console.WriteLine($"[Signaling] Node registered: {message.NodeId} (IPv4={publicEndPoint}, IPv6={publicEndPointV6}, NatType={message.NatType})");
     }
     
     private async Task HandleConnectRequestAsync(string clientId, ConnectRequest message)
@@ -391,7 +394,8 @@ public class SignalingService : IDisposable
             TargetEndPoint = requestEndPoint?.ToString() ?? string.Empty,
             TargetEndPointV6 = requestEndPointV6?.ToString(),
             IsInitiator = true,
-            Conv = conv
+            Conv = conv,
+            TargetNatType = message.NatType
         };
         await SendToClientAsync(targetNode.ClientId, holePunchStart);
         
@@ -404,7 +408,8 @@ public class SignalingService : IDisposable
             ExtranetEndPoint = requestEndPoint?.ToString() ?? string.Empty,
             ExtranetEndPointV6 = requestEndPointV6?.ToString(),
             RelayAvailable = true,
-            Conv = conv
+            Conv = conv,
+            TargetNatType = targetNode.NatType
         };
         await SendToClientAsync(clientId, connectReady);
     }

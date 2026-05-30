@@ -168,6 +168,7 @@ public class IntranetPeer : IDisposable
                     break;
 
                 case TunnelFrameType.Data:
+                case TunnelFrameType.UnreliableData:
                     await ForwardToTargetAsync(sessionId, frame.StreamId, frame.Payload);
                     break;
 
@@ -368,9 +369,9 @@ public class IntranetPeer : IDisposable
                 var sendBuffer = System.Buffers.ArrayPool<byte>.Shared.Rent(payloadLength + 16);
                 try
                 {
-                    TunnelFrame.WriteHeader(sendBuffer, 0, TunnelFrameType.Data, streamId, payloadLength);
+                    TunnelFrame.WriteHeader(sendBuffer, 0, TunnelFrameType.UnreliableData, streamId, payloadLength);
                     Buffer.BlockCopy(result.Buffer, 0, sendBuffer, 16, payloadLength);
-                    await SendToExtranetAsync(sessionId, sendBuffer, 0, 16 + payloadLength);
+                    await SendUnreliableToExtranetAsync(sessionId, sendBuffer, 0, 16 + payloadLength);
                 }
                 finally
                 {
@@ -597,6 +598,16 @@ public class IntranetPeer : IDisposable
     public async Task SendToExtranetAsync(string sessionId, byte[] data, int offset, int length)
     {
         await _connection.SendAsync(sessionId, data, offset, length);
+    }
+
+    public async Task SendUnreliableToExtranetAsync(byte[] data, int offset, int length)
+    {
+        await _connection.SendUnreliableAsync(data, offset, length);
+    }
+
+    public async Task SendUnreliableToExtranetAsync(string sessionId, byte[] data, int offset, int length)
+    {
+        await _connection.SendUnreliableAsync(sessionId, data, offset, length);
     }
 
     public void Dispose()

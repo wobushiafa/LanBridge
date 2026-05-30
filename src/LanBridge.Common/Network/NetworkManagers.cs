@@ -3,6 +3,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using LanBridge.Common.Kcp;
+using LanBridge.Common.Protocol;
 
 namespace LanBridge.Common.Network;
 
@@ -22,9 +23,11 @@ public class UdpHolePuncher : IDisposable
     
     public event Action<IPEndPoint>? OnHolePunched;
     public event Action<string>? OnError;
+    public event Action<byte[], int, IPEndPoint>? OnUnreliableDataReceived;
     
     public bool IsPunched => !_punchedEndpoints.IsEmpty;
     public IPEndPoint? LocalEndPoint => _udpClient.Client.LocalEndPoint as IPEndPoint;
+    public IPEndPoint? RemoteEndPoint => _remoteEndPoint;
     public UdpClient Client => _udpClient;
     
     public UdpHolePuncher(int port = 0, string localId = "")
@@ -58,7 +61,7 @@ public class UdpHolePuncher : IDisposable
     /// <summary>
     /// 开始打洞（主动方）
     /// </summary>
-    public async Task StartPunchingAsync(IPEndPoint remoteEp, IPEndPoint? remoteEpV6 = null, int intervalMs = 200, int timeoutMs = 10000)
+    public async Task StartPunchingAsync(IPEndPoint remoteEp, IPEndPoint? remoteEpV6 = null, int intervalMs = 200, int timeoutMs = 10000, bool predictPorts = false)
     {
         _remoteEndPoint = remoteEpV6 ?? remoteEp;
         StartReceivePump();
@@ -89,11 +92,37 @@ public class UdpHolePuncher : IDisposable
                 if (remoteEpV6 != null)
                 {
                     await _udpClient.SendAsync(punchData, punchData.Length, remoteEpV6);
+                    if (predictPorts)
+                    {
+                        for (int delta = 1; delta <= 8; delta++)
+                        {
+                            var predictedEp = new IPEndPoint(remoteEpV6.Address, remoteEpV6.Port + delta);
+                            await _udpClient.SendAsync(punchData, punchData.Length, predictedEp);
+                        }
+                        for (int delta = 1; delta <= 3; delta++)
+                        {
+                            var predictedEp = new IPEndPoint(remoteEpV6.Address, remoteEpV6.Port - delta);
+                            await _udpClient.SendAsync(punchData, punchData.Length, predictedEp);
+                        }
+                    }
                     // 给 IPv6 分配 30ms 的打洞领先权 (Happy Eyeballs 延迟偏好)
                     await Task.Delay(30, _cts.Token);
                 }
                 
                 await _udpClient.SendAsync(punchData, punchData.Length, remoteEp);
+                if (predictPorts)
+                {
+                    for (int delta = 1; delta <= 8; delta++)
+                    {
+                        var predictedEp = new IPEndPoint(remoteEp.Address, remoteEp.Port + delta);
+                        await _udpClient.SendAsync(punchData, punchData.Length, predictedEp);
+                    }
+                    for (int delta = 1; delta <= 3; delta++)
+                    {
+                        var predictedEp = new IPEndPoint(remoteEp.Address, remoteEp.Port - delta);
+                        await _udpClient.SendAsync(punchData, punchData.Length, predictedEp);
+                    }
+                }
                 
                 var delay = intervalMs - (remoteEpV6 != null ? 30 : 0);
                 if (delay > 0)
@@ -155,6 +184,12 @@ public class UdpHolePuncher : IDisposable
                 var result = await _udpClient.ReceiveAsync(_cts.Token);
                 if (TryDispatchStun(result))
                 {
+                    continue;
+                }
+                if (result.Buffer.Length >= TunnelFrame.HeaderSize && 
+                    System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(result.Buffer.AsSpan(0, 4)) == TunnelFrame.Magic)
+                {
+                    OnUnreliableDataReceived?.Invoke(result.Buffer, result.Buffer.Length, result.RemoteEndPoint);
                     continue;
                 }
                 if (TryDispatchKcp(result))

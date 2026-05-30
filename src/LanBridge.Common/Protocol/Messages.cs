@@ -3,6 +3,7 @@ using System.Buffers.Binary;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using LanBridge.Common.Network;
 
 namespace LanBridge.Common.Protocol;
 
@@ -68,6 +69,9 @@ public class RegisterMessage : BaseMessage
 
     [JsonPropertyName("public_ep_v6")]
     public string? PublicEndPointV6 { get; set; }
+
+    [JsonPropertyName("nat_type")]
+    public StunNatType NatType { get; set; }
 }
 
 /// <summary>
@@ -99,6 +103,9 @@ public class ConnectRequest : BaseMessage
 
     [JsonPropertyName("client_ep_v6")]
     public string? ClientEndPointV6 { get; set; }
+
+    [JsonPropertyName("nat_type")]
+    public StunNatType NatType { get; set; }
 }
 
 /// <summary>
@@ -125,6 +132,9 @@ public class ConnectReady : BaseMessage
     
     [JsonPropertyName("relay_available")]
     public bool RelayAvailable { get; set; }
+
+    [JsonPropertyName("target_nat_type")]
+    public StunNatType TargetNatType { get; set; }
 }
 
 /// <summary>
@@ -145,6 +155,9 @@ public class HolePunchStart : BaseMessage
     
     [JsonPropertyName("is_initiator")]
     public bool IsInitiator { get; set; }
+
+    [JsonPropertyName("target_nat_type")]
+    public StunNatType TargetNatType { get; set; }
 }
 
 /// <summary>
@@ -260,12 +273,13 @@ public enum TunnelFrameType : byte
     Close = 3,
     Ping = 4,
     Pong = 5,
-    Error = 6
+    Error = 6,
+    UnreliableData = 7
 }
 
 public sealed class TunnelFrame
 {
-    private const uint Magic = 0x31503250; // P2P1
+    public const uint Magic = 0x31503250; // P2P1
     private const byte Version = 1;
     public const int HeaderSize = 16;
     private const int MaxPayloadLength = 16 * 1024 * 1024;
@@ -282,6 +296,11 @@ public sealed class TunnelFrame
     public static TunnelFrame Data(uint streamId, byte[] payload, int offset, int length)
     {
         return new TunnelFrame { Type = TunnelFrameType.Data, StreamId = streamId, Payload = new ReadOnlyMemory<byte>(payload, offset, length) };
+    }
+
+    public static TunnelFrame UnreliableData(uint streamId, byte[] payload, int offset, int length)
+    {
+        return new TunnelFrame { Type = TunnelFrameType.UnreliableData, StreamId = streamId, Payload = new ReadOnlyMemory<byte>(payload, offset, length) };
     }
 
     public static TunnelFrame Open(uint streamId, string target)
@@ -528,6 +547,7 @@ public static class MessageSerializer
 [JsonSerializable(typeof(RelayAccept))]
 [JsonSerializable(typeof(RelayData))]
 [JsonSerializable(typeof(ErrorMessage))]
+[JsonSerializable(typeof(StunNatType))]
 internal partial class MessageJsonContext : JsonSerializerContext
 {
 }

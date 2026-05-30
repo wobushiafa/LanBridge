@@ -8,6 +8,8 @@ class Program
 {
     static void Main(string[] args)
     {
+        VerifyImplementation();
+
         Console.ForegroundColor = ConsoleColor.Cyan;
         Console.WriteLine("======================================================================");
         Console.WriteLine("        LanBridge KCP Weak Network Performance Simulation Audit       ");
@@ -223,6 +225,68 @@ class Program
         Console.WriteLine($"[Conclusion] Optimized (Adapt CC) Speedup: {adaptSpeedup:F2}x faster transfer speed!");
         Console.ResetColor();
         Console.WriteLine("======================================================================");
+        Console.WriteLine();
+    }
+
+    private static void VerifyImplementation()
+    {
+        Console.ForegroundColor = ConsoleColor.Green;
+        Console.WriteLine("[Audit] Running Implementation Verifications...");
+        Console.ResetColor();
+
+        // 1. Verify UnreliableData frame type encoding/decoding
+        uint streamId = 12345;
+        byte[] originalPayload = new byte[] { 1, 2, 3, 4, 5, 6, 7, 8 };
+        var unreliableFrame = LanBridge.Common.Protocol.TunnelFrame.UnreliableData(streamId, originalPayload, 0, originalPayload.Length);
+        
+        if (unreliableFrame.Type != LanBridge.Common.Protocol.TunnelFrameType.UnreliableData)
+        {
+            throw new Exception("Frame type is not UnreliableData!");
+        }
+
+        byte[] encoded = unreliableFrame.Encode();
+        if (!LanBridge.Common.Protocol.TunnelFrame.TryDecode(encoded, encoded.Length, out var decodedFrame))
+        {
+            throw new Exception("Failed to decode UnreliableData frame!");
+        }
+
+        if (decodedFrame.Type != LanBridge.Common.Protocol.TunnelFrameType.UnreliableData)
+        {
+            throw new Exception($"Decoded frame type mismatch: expected UnreliableData, got {decodedFrame.Type}");
+        }
+
+        if (decodedFrame.StreamId != streamId)
+        {
+            throw new Exception($"Decoded stream ID mismatch: expected {streamId}, got {decodedFrame.StreamId}");
+        }
+
+        if (!decodedFrame.Payload.Span.SequenceEqual(originalPayload))
+        {
+            throw new Exception("Decoded payload content mismatch!");
+        }
+
+        Console.WriteLine("  [Pass] UnreliableData frame encoding/decoding verified.");
+
+        // 2. Verify MessageJsonContext serialization of StunNatType
+        var regMsg = new LanBridge.Common.Protocol.RegisterMessage
+        {
+            NodeId = "test-node",
+            Token = "token",
+            NatType = LanBridge.Common.Protocol.StunNatType.Symmetric
+        };
+        var serialized = LanBridge.Common.Protocol.MessageSerializer.SerializeToString(regMsg);
+        if (!serialized.Contains("\"nat_type\":5"))
+        {
+            throw new Exception($"JSON serialization failed: expected nat_type 5 (Symmetric) in: {serialized}");
+        }
+
+        var deserialized = LanBridge.Common.Protocol.MessageSerializer.Deserialize<LanBridge.Common.Protocol.RegisterMessage>(serialized);
+        if (deserialized == null || deserialized.NatType != LanBridge.Common.Protocol.StunNatType.Symmetric)
+        {
+            throw new Exception("JSON deserialization of StunNatType failed!");
+        }
+
+        Console.WriteLine("  [Pass] MessageJsonContext AOT serialization verified.");
         Console.WriteLine();
     }
 }
