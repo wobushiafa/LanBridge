@@ -228,12 +228,7 @@ public class Program
         }
 
         var json = File.ReadAllText(configPath);
-        return System.Text.Json.JsonSerializer.Deserialize<PeerConfig>(json, new System.Text.Json.JsonSerializerOptions
-        {
-            PropertyNameCaseInsensitive = true,
-            ReadCommentHandling = System.Text.Json.JsonCommentHandling.Skip,
-            AllowTrailingCommas = true
-        });
+        return System.Text.Json.JsonSerializer.Deserialize(json, IntranetConfigJsonContext.Default.PeerConfig);
     }
 
     private static string? FindOptionValue(string[] args, string longName, string shortName)
@@ -378,4 +373,14 @@ public class Program
         Console.WriteLine("  --verbose, -v                   Enable detailed KCP diagnostics");
         Console.WriteLine("  --help, -h                      Show this help");
     }
+}
+
+[System.Text.Json.Serialization.JsonSourceGenerationOptions(
+    PropertyNameCaseInsensitive = true,
+    ReadCommentHandling = System.Text.Json.JsonCommentHandling.Skip,
+    AllowTrailingCommas = true
+)]
+[System.Text.Json.Serialization.JsonSerializable(typeof(PeerConfig))]
+internal partial class IntranetConfigJsonContext : System.Text.Json.Serialization.JsonSerializerContext
+{
 }

@@ -400,18 +400,26 @@ public class ErrorMessage : BaseMessage
 /// </summary>
 public static class MessageSerializer
 {
-    private static readonly JsonSerializerOptions Options = new()
-    {
-        PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,
-        WriteIndented = false
-    };
-    
     /// <summary>
     /// 序列化消息为 JSON 字节
     /// </summary>
     public static byte[] Serialize(BaseMessage message)
     {
-        return JsonSerializer.SerializeToUtf8Bytes(message, message.GetType(), Options);
+        return message switch
+        {
+            RegisterMessage msg => JsonSerializer.SerializeToUtf8Bytes(msg, MessageJsonContext.Default.RegisterMessage),
+            RegisterAck msg => JsonSerializer.SerializeToUtf8Bytes(msg, MessageJsonContext.Default.RegisterAck),
+            ConnectRequest msg => JsonSerializer.SerializeToUtf8Bytes(msg, MessageJsonContext.Default.ConnectRequest),
+            ConnectReady msg => JsonSerializer.SerializeToUtf8Bytes(msg, MessageJsonContext.Default.ConnectReady),
+            HolePunchStart msg => JsonSerializer.SerializeToUtf8Bytes(msg, MessageJsonContext.Default.HolePunchStart),
+            P2pConnectMessage msg => JsonSerializer.SerializeToUtf8Bytes(msg, MessageJsonContext.Default.P2pConnectMessage),
+            P2pAcceptMessage msg => JsonSerializer.SerializeToUtf8Bytes(msg, MessageJsonContext.Default.P2pAcceptMessage),
+            RelayRequest msg => JsonSerializer.SerializeToUtf8Bytes(msg, MessageJsonContext.Default.RelayRequest),
+            RelayAccept msg => JsonSerializer.SerializeToUtf8Bytes(msg, MessageJsonContext.Default.RelayAccept),
+            RelayData msg => JsonSerializer.SerializeToUtf8Bytes(msg, MessageJsonContext.Default.RelayData),
+            ErrorMessage msg => JsonSerializer.SerializeToUtf8Bytes(msg, MessageJsonContext.Default.ErrorMessage),
+            _ => JsonSerializer.SerializeToUtf8Bytes(message, MessageJsonContext.Default.BaseMessage)
+        };
     }
     
     /// <summary>
@@ -419,28 +427,45 @@ public static class MessageSerializer
     /// </summary>
     public static string SerializeToString(BaseMessage message)
     {
-        return JsonSerializer.Serialize(message, message.GetType(), Options);
+        return message switch
+        {
+            RegisterMessage msg => JsonSerializer.Serialize(msg, MessageJsonContext.Default.RegisterMessage),
+            RegisterAck msg => JsonSerializer.Serialize(msg, MessageJsonContext.Default.RegisterAck),
+            ConnectRequest msg => JsonSerializer.Serialize(msg, MessageJsonContext.Default.ConnectRequest),
+            ConnectReady msg => JsonSerializer.Serialize(msg, MessageJsonContext.Default.ConnectReady),
+            HolePunchStart msg => JsonSerializer.Serialize(msg, MessageJsonContext.Default.HolePunchStart),
+            P2pConnectMessage msg => JsonSerializer.Serialize(msg, MessageJsonContext.Default.P2pConnectMessage),
+            P2pAcceptMessage msg => JsonSerializer.Serialize(msg, MessageJsonContext.Default.P2pAcceptMessage),
+            RelayRequest msg => JsonSerializer.Serialize(msg, MessageJsonContext.Default.RelayRequest),
+            RelayAccept msg => JsonSerializer.Serialize(msg, MessageJsonContext.Default.RelayAccept),
+            RelayData msg => JsonSerializer.Serialize(msg, MessageJsonContext.Default.RelayData),
+            ErrorMessage msg => JsonSerializer.Serialize(msg, MessageJsonContext.Default.ErrorMessage),
+            _ => JsonSerializer.Serialize(message, MessageJsonContext.Default.BaseMessage)
+        };
     }
     
     public static BaseMessage? Deserialize(byte[] data)
     {
-        var doc = JsonDocument.Parse(data);
-        var typeProp = doc.RootElement.GetProperty("type");
+        using var doc = JsonDocument.Parse(data);
+        if (!doc.RootElement.TryGetProperty("type", out var typeProp))
+        {
+            return null;
+        }
         var type = (MessageType)typeProp.GetByte();
         
         return type switch
         {
-            MessageType.Register => JsonSerializer.Deserialize<RegisterMessage>(data, Options),
-            MessageType.RegisterAck => JsonSerializer.Deserialize<RegisterAck>(data, Options),
-            MessageType.ConnectRequest => JsonSerializer.Deserialize<ConnectRequest>(data, Options),
-            MessageType.ConnectReady => JsonSerializer.Deserialize<ConnectReady>(data, Options),
-            MessageType.HolePunchStart => JsonSerializer.Deserialize<HolePunchStart>(data, Options),
-            MessageType.P2pConnect => JsonSerializer.Deserialize<P2pConnectMessage>(data, Options),
-            MessageType.P2pAccept => JsonSerializer.Deserialize<P2pAcceptMessage>(data, Options),
-            MessageType.RelayRequest => JsonSerializer.Deserialize<RelayRequest>(data, Options),
-            MessageType.RelayAccept => JsonSerializer.Deserialize<RelayAccept>(data, Options),
-            MessageType.RelayData => JsonSerializer.Deserialize<RelayData>(data, Options),
-            MessageType.Error => JsonSerializer.Deserialize<ErrorMessage>(data, Options),
+            MessageType.Register => JsonSerializer.Deserialize(data, MessageJsonContext.Default.RegisterMessage),
+            MessageType.RegisterAck => JsonSerializer.Deserialize(data, MessageJsonContext.Default.RegisterAck),
+            MessageType.ConnectRequest => JsonSerializer.Deserialize(data, MessageJsonContext.Default.ConnectRequest),
+            MessageType.ConnectReady => JsonSerializer.Deserialize(data, MessageJsonContext.Default.ConnectReady),
+            MessageType.HolePunchStart => JsonSerializer.Deserialize(data, MessageJsonContext.Default.HolePunchStart),
+            MessageType.P2pConnect => JsonSerializer.Deserialize(data, MessageJsonContext.Default.P2pConnectMessage),
+            MessageType.P2pAccept => JsonSerializer.Deserialize(data, MessageJsonContext.Default.P2pAcceptMessage),
+            MessageType.RelayRequest => JsonSerializer.Deserialize(data, MessageJsonContext.Default.RelayRequest),
+            MessageType.RelayAccept => JsonSerializer.Deserialize(data, MessageJsonContext.Default.RelayAccept),
+            MessageType.RelayData => JsonSerializer.Deserialize(data, MessageJsonContext.Default.RelayData),
+            MessageType.Error => JsonSerializer.Deserialize(data, MessageJsonContext.Default.ErrorMessage),
             _ => null
         };
     }
@@ -458,7 +483,8 @@ public static class MessageSerializer
     /// </summary>
     public static T? Deserialize<T>(string json) where T : BaseMessage
     {
-        return JsonSerializer.Deserialize<T>(json, Options);
+        var typeInfo = MessageJsonContext.Default.GetTypeInfo(typeof(T)) as System.Text.Json.Serialization.Metadata.JsonTypeInfo<T>;
+        return typeInfo != null ? JsonSerializer.Deserialize(json, typeInfo) : null;
     }
     
     /// <summary>
@@ -466,6 +492,27 @@ public static class MessageSerializer
     /// </summary>
     public static T? Deserialize<T>(byte[] data) where T : BaseMessage
     {
-        return JsonSerializer.Deserialize<T>(data, Options);
+        var typeInfo = MessageJsonContext.Default.GetTypeInfo(typeof(T)) as System.Text.Json.Serialization.Metadata.JsonTypeInfo<T>;
+        return typeInfo != null ? JsonSerializer.Deserialize(data, typeInfo) : null;
     }
+}
+
+[JsonSourceGenerationOptions(
+    PropertyNamingPolicy = JsonKnownNamingPolicy.SnakeCaseLower,
+    WriteIndented = false
+)]
+[JsonSerializable(typeof(BaseMessage))]
+[JsonSerializable(typeof(RegisterMessage))]
+[JsonSerializable(typeof(RegisterAck))]
+[JsonSerializable(typeof(ConnectRequest))]
+[JsonSerializable(typeof(ConnectReady))]
+[JsonSerializable(typeof(HolePunchStart))]
+[JsonSerializable(typeof(P2pConnectMessage))]
+[JsonSerializable(typeof(P2pAcceptMessage))]
+[JsonSerializable(typeof(RelayRequest))]
+[JsonSerializable(typeof(RelayAccept))]
+[JsonSerializable(typeof(RelayData))]
+[JsonSerializable(typeof(ErrorMessage))]
+internal partial class MessageJsonContext : JsonSerializerContext
+{
 }
