@@ -56,7 +56,7 @@ public class IntranetPeer : IDisposable
     private abstract class TargetConnection : IDisposable
     {
         public abstract bool IsConnected { get; }
-        public abstract Task WriteAsync(byte[] data, int offset, int length);
+        public abstract Task WriteAsync(ReadOnlyMemory<byte> data);
         public abstract void Dispose();
     }
 
@@ -67,9 +67,9 @@ public class IntranetPeer : IDisposable
 
         public override bool IsConnected => Client.Connected;
 
-        public override async Task WriteAsync(byte[] data, int offset, int length)
+        public override async Task WriteAsync(ReadOnlyMemory<byte> data)
         {
-            await Stream.WriteAsync(data, offset, length);
+            await Stream.WriteAsync(data);
             await Stream.FlushAsync();
         }
 
@@ -89,18 +89,9 @@ public class IntranetPeer : IDisposable
 
         public override bool IsConnected => !_isDisposed;
 
-        public override async Task WriteAsync(byte[] data, int offset, int length)
+        public override async Task WriteAsync(ReadOnlyMemory<byte> data)
         {
-            if (offset == 0 && length == data.Length)
-            {
-                await Client.SendAsync(data, length, RemoteEndPoint);
-            }
-            else
-            {
-                var segment = new byte[length];
-                Buffer.BlockCopy(data, offset, segment, 0, length);
-                await Client.SendAsync(segment, length, RemoteEndPoint);
-            }
+            await Client.SendAsync(data, RemoteEndPoint);
             LastActivityUtc = DateTime.UtcNow;
         }
 
@@ -177,7 +168,7 @@ public class IntranetPeer : IDisposable
                     break;
 
                 case TunnelFrameType.Data:
-                    await ForwardToTargetAsync(sessionId, frame.StreamId, frame.Payload, 0, frame.Payload.Length);
+                    await ForwardToTargetAsync(sessionId, frame.StreamId, frame.Payload);
                     break;
 
                 case TunnelFrameType.Close:
@@ -195,16 +186,16 @@ public class IntranetPeer : IDisposable
             OnStatusChanged?.Invoke($"Stream {frame.StreamId} error: {ex.Message}");
             await SendTunnelFrameAsync(sessionId, TunnelFrame.Error(frame.StreamId, ex.Message));
             await SendTunnelFrameAsync(sessionId, TunnelFrame.Close(frame.StreamId));
-            CloseTargetConnection(sessionId, frame.StreamId);
+            CloseTargetConnection(sessionId, streamId: frame.StreamId);
         }
     }
 
-    private async Task ForwardToTargetAsync(string sessionId, uint streamId, byte[] data, int offset, int length)
+    private async Task ForwardToTargetAsync(string sessionId, uint streamId, ReadOnlyMemory<byte> data)
     {
         try
         {
             var connection = await EnsureTargetConnectionAsync(sessionId, streamId, null);
-            await connection.WriteAsync(data, offset, length);
+            await connection.WriteAsync(data);
         }
         catch (Exception ex)
         {
@@ -332,19 +323,20 @@ public class IntranetPeer : IDisposable
 
     private async Task ReadTcpTargetLoopAsync(string sessionId, uint streamId, TcpTargetConnection connection)
     {
-        var buffer = new byte[65536];
+        var buffer = System.Buffers.ArrayPool<byte>.Shared.Rent(65536 + 16);
 
         try
         {
             while (_isRunning && connection.Client.Connected)
             {
-                var bytesRead = await connection.Stream.ReadAsync(buffer, 0, buffer.Length, _cts.Token);
+                var bytesRead = await connection.Stream.ReadAsync(buffer.AsMemory(16, buffer.Length - 16), _cts.Token);
                 if (bytesRead == 0)
                 {
                     break;
                 }
 
-                await SendTunnelFrameAsync(sessionId, TunnelFrame.Data(streamId, buffer, 0, bytesRead));
+                TunnelFrame.WriteHeader(buffer, 0, TunnelFrameType.Data, streamId, bytesRead);
+                await SendToExtranetAsync(sessionId, buffer, 0, 16 + bytesRead);
             }
         }
         catch (OperationCanceledException)
@@ -357,6 +349,7 @@ public class IntranetPeer : IDisposable
         }
         finally
         {
+            System.Buffers.ArrayPool<byte>.Shared.Return(buffer);
             CloseTargetConnection(sessionId, streamId);
             await SendTunnelFrameAsync(sessionId, TunnelFrame.Close(streamId));
         }
@@ -370,7 +363,19 @@ public class IntranetPeer : IDisposable
             {
                 var result = await connection.Client.ReceiveAsync(_cts.Token);
                 connection.LastActivityUtc = DateTime.UtcNow;
-                await SendTunnelFrameAsync(sessionId, TunnelFrame.Data(streamId, result.Buffer, 0, result.Buffer.Length));
+
+                var payloadLength = result.Buffer.Length;
+                var sendBuffer = System.Buffers.ArrayPool<byte>.Shared.Rent(payloadLength + 16);
+                try
+                {
+                    TunnelFrame.WriteHeader(sendBuffer, 0, TunnelFrameType.Data, streamId, payloadLength);
+                    Buffer.BlockCopy(result.Buffer, 0, sendBuffer, 16, payloadLength);
+                    await SendToExtranetAsync(sessionId, sendBuffer, 0, 16 + payloadLength);
+                }
+                finally
+                {
+                    System.Buffers.ArrayPool<byte>.Shared.Return(sendBuffer);
+                }
             }
             catch (OperationCanceledException)
             {
@@ -426,14 +431,14 @@ public class IntranetPeer : IDisposable
         }, _cts.Token);
     }
 
-    private (string Host, int Port, string Protocol)? GetTargetFromPayload(byte[] payload)
+    private (string Host, int Port, string Protocol)? GetTargetFromPayload(ReadOnlyMemory<byte> payload)
     {
         if (payload.Length == 0)
         {
             return null;
         }
 
-        var target = Encoding.UTF8.GetString(payload);
+        var target = Encoding.UTF8.GetString(payload.Span);
         var parts = target.Split(':');
         if (parts.Length < 2)
         {

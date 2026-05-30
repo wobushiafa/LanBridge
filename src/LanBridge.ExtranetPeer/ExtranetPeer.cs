@@ -254,7 +254,18 @@ public class ExtranetPeer : IDisposable
                 }
 
                 session.LastActivityUtc = DateTime.UtcNow;
-                await SendTunnelFrameToRemoteAsync(TunnelFrame.Data(session.StreamId, data, 0, data.Length));
+                var payloadLength = data.Length;
+                var sendBuffer = System.Buffers.ArrayPool<byte>.Shared.Rent(payloadLength + 16);
+                try
+                {
+                    TunnelFrame.WriteHeader(sendBuffer, 0, TunnelFrameType.Data, session.StreamId, payloadLength);
+                    Buffer.BlockCopy(data, 0, sendBuffer, 16, payloadLength);
+                    await SendToRemoteAsync(sendBuffer, 0, 16 + payloadLength);
+                }
+                finally
+                {
+                    System.Buffers.ArrayPool<byte>.Shared.Return(sendBuffer);
+                }
             }
             catch (OperationCanceledException)
             {
@@ -323,7 +334,7 @@ public class ExtranetPeer : IDisposable
 
     private async Task HandleLocalClientAsync(uint streamId, TcpClient client, TunnelMapping mapping)
     {
-        var buffer = new byte[65536];
+        var buffer = System.Buffers.ArrayPool<byte>.Shared.Rent(65536 + 16);
 
         try
         {
@@ -338,13 +349,14 @@ public class ExtranetPeer : IDisposable
 
             while (client.Connected && _isRunning)
             {
-                var bytesRead = await stream.ReadAsync(buffer, 0, buffer.Length, _cts.Token);
+                var bytesRead = await stream.ReadAsync(buffer.AsMemory(16, buffer.Length - 16), _cts.Token);
                 if (bytesRead == 0)
                 {
                     break;
                 }
 
-                await SendTunnelFrameToRemoteAsync(TunnelFrame.Data(streamId, buffer, 0, bytesRead));
+                TunnelFrame.WriteHeader(buffer, 0, TunnelFrameType.Data, streamId, bytesRead);
+                await SendToRemoteAsync(buffer, 0, 16 + bytesRead);
             }
         }
         catch (OperationCanceledException)
@@ -356,6 +368,7 @@ public class ExtranetPeer : IDisposable
         }
         finally
         {
+            System.Buffers.ArrayPool<byte>.Shared.Return(buffer);
             _localClients.TryRemove(streamId, out _);
             client.Dispose();
             OnStatusChanged?.Invoke($"Local client disconnected: stream {streamId}");
@@ -399,8 +412,8 @@ public class ExtranetPeer : IDisposable
                 try
                 {
                     udpSession.LastActivityUtc = DateTime.UtcNow;
-                    udpSession.Listener.Send(frame.Payload, frame.Payload.Length, udpSession.ClientEndPoint);
-                    OnDataReceived?.Invoke(frame.Payload, frame.Payload.Length);
+                    udpSession.Listener.Send(frame.Payload.Span, udpSession.ClientEndPoint);
+                    OnDataReceived?.Invoke(Array.Empty<byte>(), frame.Payload.Length);
                 }
                 catch (Exception ex)
                 {
@@ -412,9 +425,9 @@ public class ExtranetPeer : IDisposable
                 try
                 {
                     var stream = client.GetStream();
-                    stream.Write(frame.Payload, 0, frame.Payload.Length);
+                    stream.Write(frame.Payload.Span);
                     stream.Flush();
-                    OnDataReceived?.Invoke(frame.Payload, frame.Payload.Length);
+                    OnDataReceived?.Invoke(Array.Empty<byte>(), frame.Payload.Length);
                 }
                 catch (Exception ex)
                 {

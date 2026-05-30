@@ -782,29 +782,35 @@ public class KcpSession : IDisposable
 
         int inputResult;
         int size;
-        var buffer = new byte[65536];
-        lock (_kcpLock)
+        var buffer = System.Buffers.ArrayPool<byte>.Shared.Rent(65536);
+        try
         {
-            inputResult = _kcp.Input(packet, 0, packet.Length);
-            size = _kcp.Receive(buffer, 0, buffer.Length);
-        }
-
-        if (inputResult < 0 && packet.Length >= 24)
-        {
-            Interlocked.Increment(ref _inputErrors);
-            OnTrace?.Invoke($"KCP input ignored {packet.Length} bytes from {remoteEndPoint}, result={inputResult}");
-        }
-
-        if (size > 0)
-        {
-            var payload = buffer.AsSpan(0, size).ToArray();
-            var deliveredMessages = Interlocked.Increment(ref _deliveredMessages);
-            Interlocked.Add(ref _deliveredBytes, payload.Length);
-            if (deliveredMessages <= 5)
+            lock (_kcpLock)
             {
-                OnTrace?.Invoke($"KCP delivered {payload.Length} bytes from {remoteEndPoint}");
+                inputResult = _kcp.Input(packet, 0, packet.Length);
+                size = _kcp.Receive(buffer, 0, buffer.Length);
             }
-            OnDataReceived?.Invoke(payload, payload.Length);
+
+            if (inputResult < 0 && packet.Length >= 24)
+            {
+                Interlocked.Increment(ref _inputErrors);
+                OnTrace?.Invoke($"KCP input ignored {packet.Length} bytes from {remoteEndPoint}, result={inputResult}");
+            }
+
+            if (size > 0)
+            {
+                var deliveredMessages = Interlocked.Increment(ref _deliveredMessages);
+                Interlocked.Add(ref _deliveredBytes, size);
+                if (deliveredMessages <= 5)
+                {
+                    OnTrace?.Invoke($"KCP delivered {size} bytes from {remoteEndPoint}");
+                }
+                OnDataReceived?.Invoke(buffer, size);
+            }
+        }
+        finally
+        {
+            System.Buffers.ArrayPool<byte>.Shared.Return(buffer);
         }
     }
     

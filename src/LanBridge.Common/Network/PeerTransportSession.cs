@@ -109,7 +109,7 @@ public sealed class PeerTransportSession : IDisposable
             {
                 if (frame.Payload.Length == 8)
                 {
-                    var sentTicks = BinaryPrimitives.ReadInt64LittleEndian(frame.Payload);
+                    var sentTicks = BinaryPrimitives.ReadInt64LittleEndian(frame.Payload.Span);
                     _lastRttMs = Math.Max(0, (long)(DateTime.UtcNow - new DateTime(sentTicks, DateTimeKind.Utc)).TotalMilliseconds);
                 }
                 return;

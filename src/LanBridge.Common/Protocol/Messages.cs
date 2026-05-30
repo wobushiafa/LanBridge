@@ -267,18 +267,21 @@ public sealed class TunnelFrame
 {
     private const uint Magic = 0x31503250; // P2P1
     private const byte Version = 1;
-    private const int HeaderSize = 16;
+    public const int HeaderSize = 16;
     private const int MaxPayloadLength = 16 * 1024 * 1024;
 
     public TunnelFrameType Type { get; init; }
     public uint StreamId { get; init; }
-    public byte[] Payload { get; init; } = Array.Empty<byte>();
+    public ReadOnlyMemory<byte> Payload { get; init; } = ReadOnlyMemory<byte>.Empty;
+
+    public static TunnelFrame Data(uint streamId, ReadOnlyMemory<byte> payload)
+    {
+        return new TunnelFrame { Type = TunnelFrameType.Data, StreamId = streamId, Payload = payload };
+    }
 
     public static TunnelFrame Data(uint streamId, byte[] payload, int offset, int length)
     {
-        var copy = new byte[length];
-        Buffer.BlockCopy(payload, offset, copy, 0, length);
-        return new TunnelFrame { Type = TunnelFrameType.Data, StreamId = streamId, Payload = copy };
+        return new TunnelFrame { Type = TunnelFrameType.Data, StreamId = streamId, Payload = new ReadOnlyMemory<byte>(payload, offset, length) };
     }
 
     public static TunnelFrame Open(uint streamId, string target)
@@ -306,6 +309,16 @@ public sealed class TunnelFrame
         return new TunnelFrame { Type = TunnelFrameType.Pong, StreamId = 0, Payload = payload };
     }
 
+    public static TunnelFrame Ping(ReadOnlyMemory<byte> payload)
+    {
+        return new TunnelFrame { Type = TunnelFrameType.Ping, StreamId = 0, Payload = payload };
+    }
+
+    public static TunnelFrame Pong(ReadOnlyMemory<byte> payload)
+    {
+        return new TunnelFrame { Type = TunnelFrameType.Pong, StreamId = 0, Payload = payload };
+    }
+
     public static TunnelFrame Error(uint streamId, string message)
     {
         return new TunnelFrame
@@ -318,7 +331,7 @@ public sealed class TunnelFrame
 
     public string PayloadAsString()
     {
-        return Payload.Length == 0 ? string.Empty : Encoding.UTF8.GetString(Payload);
+        return Payload.Length == 0 ? string.Empty : Encoding.UTF8.GetString(Payload.Span);
     }
 
     public byte[] Encode()
@@ -329,14 +342,19 @@ public sealed class TunnelFrame
         }
 
         var buffer = new byte[HeaderSize + Payload.Length];
-        BinaryPrimitives.WriteUInt32LittleEndian(buffer.AsSpan(0, 4), Magic);
-        buffer[4] = Version;
-        buffer[5] = (byte)Type;
-        BinaryPrimitives.WriteUInt16LittleEndian(buffer.AsSpan(6, 2), 0);
-        BinaryPrimitives.WriteUInt32LittleEndian(buffer.AsSpan(8, 4), StreamId);
-        BinaryPrimitives.WriteInt32LittleEndian(buffer.AsSpan(12, 4), Payload.Length);
-        Buffer.BlockCopy(Payload, 0, buffer, HeaderSize, Payload.Length);
+        WriteHeader(buffer, 0, Type, StreamId, Payload.Length);
+        Payload.CopyTo(buffer.AsMemory(HeaderSize));
         return buffer;
+    }
+
+    public static void WriteHeader(byte[] buffer, int offset, TunnelFrameType type, uint streamId, int payloadLength)
+    {
+        BinaryPrimitives.WriteUInt32LittleEndian(buffer.AsSpan(offset, 4), Magic);
+        buffer[offset + 4] = Version;
+        buffer[offset + 5] = (byte)type;
+        BinaryPrimitives.WriteUInt16LittleEndian(buffer.AsSpan(offset + 6, 2), 0);
+        BinaryPrimitives.WriteUInt32LittleEndian(buffer.AsSpan(offset + 8, 4), streamId);
+        BinaryPrimitives.WriteInt32LittleEndian(buffer.AsSpan(offset + 12, 4), payloadLength);
     }
 
     public static bool TryDecode(byte[] data, int length, out TunnelFrame frame)
@@ -365,11 +383,8 @@ public sealed class TunnelFrame
             return false;
         }
 
-        var payload = new byte[payloadLength];
-        if (payloadLength > 0)
-        {
-            Buffer.BlockCopy(data, HeaderSize, payload, 0, payloadLength);
-        }
+        // 零拷贝：直接以 Memory 切片形式引用底层 KCP/UDP 数据包，无任何数据复制和堆内存分配！
+        var payload = new ReadOnlyMemory<byte>(data, HeaderSize, payloadLength);
 
         frame = new TunnelFrame
         {
