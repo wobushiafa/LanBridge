@@ -66,6 +66,15 @@ public sealed class ConnectionNegotiator : IDisposable
 
     private sealed record PendingPunch(string SessionId, uint Conv);
 
+    private static string GetAddressKey(IPAddress address)
+    {
+        if (address.IsIPv4MappedToIPv6)
+        {
+            return address.MapToIPv4().ToString();
+        }
+        return address.ToString();
+    }
+
     public void RaiseStatusChanged(string status)
     {
         OnStatusChanged?.Invoke(status);
@@ -76,7 +85,7 @@ public sealed class ConnectionNegotiator : IDisposable
         var sessionId = _activeSessionId;
         
         // Register the client in pending punches so it gets picked up by MarkPunched
-        _pendingPunches[clientEndPoint.Address.ToString()] = new PendingPunch(sessionId, conv);
+        _pendingPunches[GetAddressKey(clientEndPoint.Address)] = new PendingPunch(sessionId, conv);
         
         if (_holePuncher != null)
         {
@@ -581,11 +590,11 @@ public sealed class ConnectionNegotiator : IDisposable
         
         if (targetEndPoint != null)
         {
-            _pendingPunches[targetEndPoint.Address.ToString()] = new PendingPunch(sessionId, conv);
+            _pendingPunches[GetAddressKey(targetEndPoint.Address)] = new PendingPunch(sessionId, conv);
         }
         if (targetEndPointV6 != null)
         {
-            _pendingPunches[targetEndPointV6.Address.ToString()] = new PendingPunch(sessionId, conv);
+            _pendingPunches[GetAddressKey(targetEndPointV6.Address)] = new PendingPunch(sessionId, conv);
         }
         
         OnModeChanged?.Invoke(PeerTransportMode.None);
@@ -632,7 +641,7 @@ public sealed class ConnectionNegotiator : IDisposable
             OnStatusChanged?.Invoke($"Hole punched to {endpoint}");
             _isHolePunching = false;
 
-            if (!_pendingPunches.TryRemove(endpoint.Address.ToString(), out var pending))
+            if (!_pendingPunches.TryRemove(GetAddressKey(endpoint.Address), out var pending))
             {
                 OnStatusChanged?.Invoke($"Hole punched endpoint has no pending session: {endpoint}");
                 _holePuncher.RemovePunchedEndpoint(endpoint);
@@ -659,7 +668,7 @@ public sealed class ConnectionNegotiator : IDisposable
             _isHolePunching = false;
 
             var sessionId = _activeSessionId;
-            _pendingPunches[endpoint.Address.ToString()] = new PendingPunch(sessionId, conv);
+            _pendingPunches[GetAddressKey(endpoint.Address)] = new PendingPunch(sessionId, conv);
 
             _holePuncher.TriggerHolePunched(endpoint, conv);
         };
