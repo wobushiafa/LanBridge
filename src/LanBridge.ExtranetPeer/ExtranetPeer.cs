@@ -20,6 +20,7 @@ public class ClientConfig
     public int HolePunchTimeoutMs { get; set; } = 10000;
     public bool EnableRelayFallback { get; set; } = true;
     public bool Verbose { get; set; }
+    public bool EnableKcpCongestionControl { get; set; } = false;
     public List<TunnelMapping> Mappings { get; set; } = new();
 }
 
@@ -94,7 +95,8 @@ public class ExtranetPeer : IDisposable
             UdpPort = _config.UdpPort,
             HolePunchTimeoutMs = _config.HolePunchTimeoutMs,
             EnableRelayFallback = _config.EnableRelayFallback,
-            Verbose = _config.Verbose
+            Verbose = _config.Verbose,
+            EnableKcpCongestionControl = _config.EnableKcpCongestionControl
         });
         _connection.OnStatusChanged += HandleConnectionStatus;
         _connection.OnModeChanged += HandleTransportModeChanged;
@@ -364,7 +366,10 @@ public class ExtranetPeer : IDisposable
         }
         catch (Exception ex)
         {
-            OnStatusChanged?.Invoke($"Local client stream {streamId} error: {ex.Message}");
+            if (_localClients.ContainsKey(streamId))
+            {
+                OnStatusChanged?.Invoke($"Local client stream {streamId} error: {ex.Message}");
+            }
         }
         finally
         {

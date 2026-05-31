@@ -30,6 +30,7 @@
 - 🧊 **零分配级内存优化**：传输载荷的字节缓冲区完全采用 `System.Buffers.ArrayPool<byte>.Shared` 线程安全对象池，杜绝堆内存碎片与 GC 停顿，保障高吞吐下的平稳运行。
 - 🎯 **标准 STUN RFC 5389**：集成原生无外部依赖的标准 STUN 解析，消除 CPU 字节序架构依赖性，完美支持标准 STUN 公网服务器和 NAT 诊断功能。
 - 🤝 **首包零丢失竞态防护**：使用 Task 驱动的异步状态同步结构保护内网目标连接，彻底消除 UDP/KCP 穿透初期的异步数据包到达竞争，实现首包 100% 成功交付。
+- 🔁 **信令自动重连与高可用容灾**：客户端内置后台连接管理器。当信令服务器在启动时离线时，客户端会自动以 5 秒周期进行重试而不会闪退；在运行期如果遭遇信令断连，客户端也能即时捕获，并在信令服务器恢复后自动重建连接并重新注册，保障隧道在无人值守环境下的绝对稳定性。
 - 🔗 **P2P 优先与自动中继后备**：优先尝试打洞建立 P2P UDP 直连；在 NAT 条件极差（如双侧对称 NAT）时，秒级无缝降级到 **Relay 中继模式**。
 
 ---
@@ -178,6 +179,7 @@ dotnet run --project src/LanBridge.ExtranetPeer -- \
   "targetSourcePort": 554,
   "udpPort": 0,
   "verbose": false,
+  "enableKcpCongestionControl": false,
   "allowedTargets": [
     {
       "host": "192.168.7.230",
@@ -207,6 +209,7 @@ dotnet run --project src/LanBridge.ExtranetPeer -- \
   "holePunchTimeoutMs": 10000,
   "enableRelayFallback": true,
   "verbose": false,
+  "enableKcpCongestionControl": false,
   "mappings": [
     {
       "localPort": 8554,
@@ -273,6 +276,11 @@ LanBridge 在核心数据通路上实现了全链条零拷贝：
 在局域网段或对等网络子网内，LanBridge 能在不需要外部介入的前提下自动识别彼此：
 - **双模探测监听**：后台自动创建 UDP 9005 端口监听服务，采用 `ReuseAddress` 机制允许多套进程在单台机器共存，向 Multicast 组 `239.255.0.1` 和全局广播 `255.255.255.255` 并发安全局域网探测帧。
 - **2 毫秒内瞬间闪连**：只要局域网链路可达，发现质询帧将跳过 Signaling 连接直接触发 `LB_ADVERTISE` 回复单播，本地 `TriggerHolePunched` 会瞬间激活 direct-P2P，将常规需要 1~2 秒的云端握手缩短至 **< 2ms** 局域网物理直连。
+
+### 4. KCP 拥塞控制开关与实时音视频优化 (`enableKcpCongestionControl`)
+KCP 本身提供拥塞控制（类似于 TCP 的 AIMD），在丢包时会收缩发送窗口（cwnd 降为 1）以确保公平性：
+- **默认建议关闭（`false`）**：对 RTSP 视频拉流、实时游戏等高吞吐且极度敏感超时的 UDP 会话，任何微小丢包导致的拥塞窗口收缩都会造成视频分片传输超时。关闭拥塞控制可让 KCP 全速依靠 1024 窗口（Flow Control）进行极速发送，消除卡顿和播放器连接超时。
+- **可选开启（`true`）**：仅在公网极度拥堵、且传输任务为文件分发或后台非实时大流量等网络公平性要求极高的场景下开启。
 
 ---
 

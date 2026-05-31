@@ -20,6 +20,7 @@ public class PeerConfig
     public string TargetSourceHost { get; set; } = "127.0.0.1";
     public int TargetSourcePort { get; set; } = 554;
     public bool Verbose { get; set; }
+    public bool EnableKcpCongestionControl { get; set; } = false;
     public List<TargetEndpoint> AllowedTargets { get; set; } = new();
     public List<AllowedSubnet> AllowedSubnets { get; set; } = new();
 }
@@ -118,7 +119,8 @@ public class IntranetPeer : IDisposable
             StunAlternateServerPort = _config.StunAlternateServerPort,
             Token = _config.Token,
             UdpPort = _config.UdpPort,
-            Verbose = _config.Verbose
+            Verbose = _config.Verbose,
+            EnableKcpCongestionControl = _config.EnableKcpCongestionControl
         });
         _connection.OnStatusChanged += status => OnStatusChanged?.Invoke(status);
         _connection.OnSessionDataReceived += (sessionId, data, length) => _ = HandleTunnelFrameAsync(sessionId, data, length);
@@ -345,8 +347,11 @@ public class IntranetPeer : IDisposable
         }
         catch (Exception ex)
         {
-            OnStatusChanged?.Invoke($"TCP target read error on stream {streamId}: {ex.Message}");
-            await SendTunnelFrameAsync(sessionId, TunnelFrame.Error(streamId, ex.Message));
+            if (_targetConnections.ContainsKey(new StreamKey(sessionId, streamId)))
+            {
+                OnStatusChanged?.Invoke($"TCP target read error on stream {streamId}: {ex.Message}");
+                await SendTunnelFrameAsync(sessionId, TunnelFrame.Error(streamId, ex.Message));
+            }
         }
         finally
         {

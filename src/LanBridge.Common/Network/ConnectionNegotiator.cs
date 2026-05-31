@@ -28,6 +28,7 @@ public sealed class PeerConnectionOptions
     public int HolePunchTimeoutMs { get; init; } = 10000;
     public bool EnableRelayFallback { get; init; } = true;
     public bool Verbose { get; init; }
+    public bool EnableKcpCongestionControl { get; init; } = false;
 }
 
 public sealed class ConnectionNegotiator : IDisposable
@@ -47,6 +48,7 @@ public sealed class ConnectionNegotiator : IDisposable
     private string _activeSessionId = "default";
     private DateTime _lastConnectionRequestUtc = DateTime.MinValue;
     private readonly CancellationTokenSource _cts = new();
+    private bool _isNatKeepAliveRunning;
 
     public event Action<string>? OnStatusChanged;
     public event Action<byte[], int>? OnDataReceived;
@@ -129,18 +131,9 @@ public sealed class ConnectionNegotiator : IDisposable
         }
 
         await DetectNatAsync();
-        await ConnectToSignalingServerAsync();
 
-        if (_options.Role == PeerConnectionRole.Intranet)
-        {
-            await RegisterNodeAsync();
-            OnStatusChanged?.Invoke("Ready");
-            StartNatKeepAliveLoop();
-        }
-        else
-        {
-            await RequestConnectionAsync(force: true);
-        }
+        // Start signaling connection manager loop in background
+        _ = Task.Run(SignalingConnectionManagerLoopAsync, _cts.Token);
     }
 
     private void StartNatKeepAliveLoop()
@@ -150,48 +143,61 @@ public sealed class ConnectionNegotiator : IDisposable
             return;
         }
 
+        if (_isNatKeepAliveRunning)
+        {
+            return;
+        }
+        _isNatKeepAliveRunning = true;
+
         _ = Task.Run(async () =>
         {
-            using var timer = new PeriodicTimer(TimeSpan.FromSeconds(25));
-            while (await timer.WaitForNextTickAsync(_cts.Token))
+            try
             {
-                if (_cts.IsCancellationRequested)
+                using var timer = new PeriodicTimer(TimeSpan.FromSeconds(25));
+                while (await timer.WaitForNextTickAsync(_cts.Token))
                 {
-                    break;
-                }
-
-                if (!IsSignalingConnected)
-                {
-                    continue;
-                }
-
-                if (IsConnected || _isHolePunching)
-                {
-                    continue;
-                }
-
-                try
-                {
-                    var result = await StunClient.QueryAsync(
-                        _holePuncher!,
-                        _options.StunServerHost,
-                        _options.StunServerPort,
-                        timeoutMs: 2000);
-                        
-                    if (result.PublicEndPoint != null && !result.PublicEndPoint.Equals(_publicEndPoint))
+                    if (_cts.IsCancellationRequested)
                     {
-                        OnStatusChanged?.Invoke($"NAT mapping changed from {_publicEndPoint} to {result.PublicEndPoint}. Re-registering...");
-                        _publicEndPoint = result.PublicEndPoint;
-                        await RegisterNodeAsync();
+                        break;
+                    }
+
+                    if (!IsSignalingConnected)
+                    {
+                        continue;
+                    }
+
+                    if (IsConnected || _isHolePunching)
+                    {
+                        continue;
+                    }
+
+                    try
+                    {
+                        var result = await StunClient.QueryAsync(
+                            _holePuncher!,
+                            _options.StunServerHost,
+                            _options.StunServerPort,
+                            timeoutMs: 2000);
+                            
+                        if (result.PublicEndPoint != null && !result.PublicEndPoint.Equals(_publicEndPoint))
+                        {
+                            OnStatusChanged?.Invoke($"NAT mapping changed from {_publicEndPoint} to {result.PublicEndPoint}. Re-registering...");
+                            _publicEndPoint = result.PublicEndPoint;
+                            await RegisterNodeAsync();
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        if (_options.Verbose)
+                        {
+                            OnStatusChanged?.Invoke($"NAT keep-alive failed: {ex.Message}");
+                        }
                     }
                 }
-                catch (Exception ex)
-                {
-                    if (_options.Verbose)
-                    {
-                        OnStatusChanged?.Invoke($"NAT keep-alive failed: {ex.Message}");
-                    }
-                }
+            }
+            finally
+            {
+                _isNatKeepAliveRunning = false;
             }
         }, _cts.Token);
     }
@@ -439,21 +445,85 @@ public sealed class ConnectionNegotiator : IDisposable
         };
     }
 
-    private async Task ConnectToSignalingServerAsync()
+    private async Task SignalingConnectionManagerLoopAsync()
     {
-        OnStatusChanged?.Invoke("Connecting to signaling server...");
-
-        _signalingClient = new SignalingClient(_options.SignalingServerHost, _options.SignalingServerPort);
-        _signalingClient.OnMessageReceived += HandleSignalingMessage;
-        _signalingClient.OnDisconnected += () =>
+        while (!_cts.IsCancellationRequested)
         {
-            OnSignalingDisconnected?.Invoke();
-            OnStatusChanged?.Invoke("Disconnected from signaling server");
-        };
-        _signalingClient.OnError += error => OnStatusChanged?.Invoke($"Signaling error: {error}");
+            if (IsSignalingConnected)
+            {
+                try
+                {
+                    await Task.Delay(2000, _cts.Token);
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
+                continue;
+            }
 
-        await _signalingClient.ConnectAsync();
-        OnStatusChanged?.Invoke("Connected to signaling server");
+            // Clean up any old instance
+            if (_signalingClient != null)
+            {
+                try
+                {
+                    _signalingClient.Dispose();
+                }
+                catch { }
+                _signalingClient = null;
+            }
+
+            try
+            {
+                OnStatusChanged?.Invoke("Connecting to signaling server...");
+                _signalingClient = new SignalingClient(_options.SignalingServerHost, _options.SignalingServerPort);
+                _signalingClient.OnMessageReceived += HandleSignalingMessage;
+                _signalingClient.OnDisconnected += () =>
+                {
+                    OnSignalingDisconnected?.Invoke();
+                    OnStatusChanged?.Invoke("Disconnected from signaling server");
+                };
+                _signalingClient.OnError += error => OnStatusChanged?.Invoke($"Signaling error: {error}");
+
+                await _signalingClient.ConnectAsync();
+                OnStatusChanged?.Invoke("Connected to signaling server");
+
+                if (_options.Role == PeerConnectionRole.Intranet)
+                {
+                    await RegisterNodeAsync();
+                    OnStatusChanged?.Invoke("Ready");
+                    StartNatKeepAliveLoop();
+                }
+                else
+                {
+                    await RequestConnectionAsync(force: true);
+                }
+            }
+            catch (Exception ex)
+            {
+                OnStatusChanged?.Invoke($"Failed to connect to signaling server: {ex.Message}. Retrying in 5 seconds...");
+                
+                // Clean up in case of failed connect
+                if (_signalingClient != null)
+                {
+                    try
+                    {
+                        _signalingClient.Dispose();
+                    }
+                    catch { }
+                    _signalingClient = null;
+                }
+
+                try
+                {
+                    await Task.Delay(5000, _cts.Token);
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
+            }
+        }
     }
 
     private async Task RegisterNodeAsync()
@@ -651,7 +721,7 @@ public sealed class ConnectionNegotiator : IDisposable
             var conv = pending.Conv != 0 ? pending.Conv : P2PConv.FromEndpoints(_publicEndPoint!, endpoint);
             OnStatusChanged?.Invoke($"P2P conv: {conv}");
             _relayProbeCts?.Cancel();
-            var session = new KcpSession(conv, _holePuncher.Client, endpoint, ownReceiveLoop: false);
+            var session = new KcpSession(conv, _holePuncher.Client, endpoint, enableCongestionControl: _options.EnableKcpCongestionControl, ownReceiveLoop: false);
             _holePuncher.RegisterKcpSession(session);
             GetSession(pending.SessionId).UseP2p(session);
             if (pending.SessionId == _activeSessionId)
