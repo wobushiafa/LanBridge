@@ -111,49 +111,7 @@ public sealed class ConnectionNegotiator : IDisposable
         if (!string.IsNullOrWhiteSpace(_options.LocalBindIp) && IPAddress.TryParse(_options.LocalBindIp, out var parsedIp))
         {
             localIp = parsedIp;
-            OnStatusChanged?.Invoke($"Using manually configured local bind IP: {localIp}");
-        }
-        else
-        {
-            try
-            {
-                var addresses = await Dns.GetHostAddressesAsync(_options.SignalingServerHost);
-                var targetIp = addresses.FirstOrDefault(a => a.AddressFamily == AddressFamily.InterNetwork || a.AddressFamily == AddressFamily.InterNetworkV6);
-                if (targetIp != null)
-                {
-                    using var socket = new Socket(targetIp.AddressFamily, SocketType.Dgram, ProtocolType.Udp);
-                    socket.Connect(targetIp, 1);
-                    localIp = (socket.LocalEndPoint as IPEndPoint)?.Address;
-                }
-            }
-            catch (Exception ex)
-            {
-                if (_options.Verbose)
-                {
-                    OnStatusChanged?.Invoke($"[Routing] Failed to determine local routing interface IP: {ex.Message}");
-                }
-            }
-
-            // Check if the detected IP is a Clash/Proxy/Virtual interface (e.g. 198.18.X.X, 169.254.X.X)
-            if (localIp != null)
-            {
-                var ipStr = localIp.ToString();
-                if (ipStr.StartsWith("198.18.") || ipStr.StartsWith("169.254."))
-                {
-                    OnStatusChanged?.Invoke($"[Routing] Detected proxy/virtual interface IP ({localIp}). Scanning for physical interface IP...");
-                    var physicalIp = GetPhysicalLanIp();
-                    if (physicalIp != null)
-                    {
-                        localIp = physicalIp;
-                        OnStatusChanged?.Invoke($"[Routing] Bypassed proxy interface, resolved local physical IP: {localIp}");
-                    }
-                }
-            }
-        }
-
-        if (localIp != null)
-        {
-            OnStatusChanged?.Invoke($"Binding UDP socket to local interface IP: {localIp}");
+            OnStatusChanged?.Invoke($"Binding UDP socket to manually configured local IP: {localIp}");
         }
         else
         {
@@ -937,48 +895,6 @@ public sealed class ConnectionNegotiator : IDisposable
                 }
             }
         }, token);
-    }
-
-    private static IPAddress? GetPhysicalLanIp()
-    {
-        try
-        {
-            foreach (var ni in System.Net.NetworkInformation.NetworkInterface.GetAllNetworkInterfaces())
-            {
-                if (ni.OperationalStatus != System.Net.NetworkInformation.OperationalStatus.Up) continue;
-                if (ni.NetworkInterfaceType == System.Net.NetworkInformation.NetworkInterfaceType.Loopback) continue;
-                if (ni.NetworkInterfaceType == System.Net.NetworkInformation.NetworkInterfaceType.Tunnel) continue;
-
-                var desc = ni.Description.ToLowerInvariant();
-                var name = ni.Name.ToLowerInvariant();
-                if (desc.Contains("virtual") || desc.Contains("vmware") || desc.Contains("virtualbox") || 
-                    desc.Contains("tap") || desc.Contains("tun") || desc.Contains("vpn") || 
-                    desc.Contains("vbox") || desc.Contains("clash") || desc.Contains("zerotier") || 
-                    desc.Contains("tailscale") || desc.Contains("wsl") || desc.Contains("npcap") ||
-                    name.Contains("wsl") || name.Contains("vethernet"))
-                {
-                    continue;
-                }
-
-                var ipProps = ni.GetIPProperties();
-                foreach (var addr in ipProps.UnicastAddresses)
-                {
-                    if (addr.Address.AddressFamily == AddressFamily.InterNetwork)
-                    {
-                        if (IPAddress.IsLoopback(addr.Address)) continue;
-                        var ipStr = addr.Address.ToString();
-                        if (ipStr.StartsWith("169.254.") || ipStr.StartsWith("198.18.")) continue;
-
-                        return addr.Address;
-                    }
-                }
-            }
-        }
-        catch
-        {
-            // ignore
-        }
-        return null;
     }
 
     public void Dispose()
