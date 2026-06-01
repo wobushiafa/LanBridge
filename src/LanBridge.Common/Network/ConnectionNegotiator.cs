@@ -106,7 +106,36 @@ public sealed class ConnectionNegotiator : IDisposable
 
     public async Task StartAsync()
     {
-        _holePuncher = new UdpHolePuncher(_options.UdpPort, _options.NodeId);
+        IPAddress? localIp = null;
+        try
+        {
+            var addresses = await Dns.GetHostAddressesAsync(_options.SignalingServerHost);
+            var targetIp = addresses.FirstOrDefault(a => a.AddressFamily == AddressFamily.InterNetwork || a.AddressFamily == AddressFamily.InterNetworkV6);
+            if (targetIp != null)
+            {
+                using var socket = new Socket(targetIp.AddressFamily, SocketType.Dgram, ProtocolType.Udp);
+                socket.Connect(targetIp, 1);
+                localIp = (socket.LocalEndPoint as IPEndPoint)?.Address;
+            }
+        }
+        catch (Exception ex)
+        {
+            if (_options.Verbose)
+            {
+                OnStatusChanged?.Invoke($"[Routing] Failed to determine local routing interface IP: {ex.Message}");
+            }
+        }
+
+        if (localIp != null)
+        {
+            OnStatusChanged?.Invoke($"Binding UDP socket to local interface IP: {localIp}");
+        }
+        else
+        {
+            OnStatusChanged?.Invoke("Binding UDP socket to wildcard address");
+        }
+
+        _holePuncher = new UdpHolePuncher(_options.UdpPort, _options.NodeId, localIp);
         ConfigureHolePuncherEvents();
 
         // Start LAN Discovery Service to scan and respond to local subnets

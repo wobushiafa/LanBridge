@@ -31,20 +31,45 @@ public class UdpHolePuncher : IDisposable
     public IPEndPoint? RemoteEndPoint => _remoteEndPoint;
     public UdpClient Client => _udpClient;
     
-    public UdpHolePuncher(int port = 0, string localId = "")
+    public UdpHolePuncher(int port = 0, string localId = "", IPAddress? localIp = null)
     {
+        _localId = localId;
+        _cts = new CancellationTokenSource();
+
         try
         {
-            _udpClient = new UdpClient(AddressFamily.InterNetworkV6);
-            _udpClient.Client.DualMode = true;
-            _udpClient.Client.Bind(new IPEndPoint(IPAddress.IPv6Any, port));
+            if (localIp != null)
+            {
+                _udpClient = new UdpClient(localIp.AddressFamily);
+                _udpClient.Client.Bind(new IPEndPoint(localIp, port));
+            }
+            else
+            {
+                try
+                {
+                    _udpClient = new UdpClient(AddressFamily.InterNetworkV6);
+                    _udpClient.Client.DualMode = true;
+                    _udpClient.Client.Bind(new IPEndPoint(IPAddress.IPv6Any, port));
+                }
+                catch
+                {
+                    _udpClient = new UdpClient(port);
+                }
+            }
         }
         catch
         {
-            _udpClient = new UdpClient(port);
+            try
+            {
+                _udpClient = new UdpClient(AddressFamily.InterNetworkV6);
+                _udpClient.Client.DualMode = true;
+                _udpClient.Client.Bind(new IPEndPoint(IPAddress.IPv6Any, port));
+            }
+            catch
+            {
+                _udpClient = new UdpClient(port);
+            }
         }
-        _localId = localId;
-        _cts = new CancellationTokenSource();
     }
 
     public void RegisterStunRequest(byte[] transactionId, TaskCompletionSource<byte[]> tcs)
