@@ -29,7 +29,6 @@ public sealed class PeerConnectionOptions
     public bool EnableRelayFallback { get; init; } = true;
     public bool Verbose { get; init; }
     public bool EnableKcpCongestionControl { get; init; } = false;
-    public string LocalBindIp { get; init; } = string.Empty;
 }
 
 public sealed class ConnectionNegotiator : IDisposable
@@ -107,18 +106,7 @@ public sealed class ConnectionNegotiator : IDisposable
 
     public async Task StartAsync()
     {
-        IPAddress? localIp = null;
-        if (!string.IsNullOrWhiteSpace(_options.LocalBindIp) && IPAddress.TryParse(_options.LocalBindIp, out var parsedIp))
-        {
-            localIp = parsedIp;
-            OnStatusChanged?.Invoke($"Binding UDP socket to manually configured local IP: {localIp}");
-        }
-        else
-        {
-            OnStatusChanged?.Invoke("Binding UDP socket to wildcard address");
-        }
-
-        _holePuncher = new UdpHolePuncher(_options.UdpPort, _options.NodeId, localIp);
+        _holePuncher = new UdpHolePuncher(_options.UdpPort, _options.NodeId);
         ConfigureHolePuncherEvents();
 
         // Start LAN Discovery Service to scan and respond to local subnets

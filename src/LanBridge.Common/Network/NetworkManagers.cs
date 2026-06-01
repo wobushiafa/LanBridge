@@ -31,45 +31,20 @@ public class UdpHolePuncher : IDisposable
     public IPEndPoint? RemoteEndPoint => _remoteEndPoint;
     public UdpClient Client => _udpClient;
     
-    public UdpHolePuncher(int port = 0, string localId = "", IPAddress? localIp = null)
+    public UdpHolePuncher(int port = 0, string localId = "")
     {
-        _localId = localId;
-        _cts = new CancellationTokenSource();
-
         try
         {
-            if (localIp != null)
-            {
-                _udpClient = new UdpClient(localIp.AddressFamily);
-                _udpClient.Client.Bind(new IPEndPoint(localIp, port));
-            }
-            else
-            {
-                try
-                {
-                    _udpClient = new UdpClient(AddressFamily.InterNetworkV6);
-                    _udpClient.Client.DualMode = true;
-                    _udpClient.Client.Bind(new IPEndPoint(IPAddress.IPv6Any, port));
-                }
-                catch
-                {
-                    _udpClient = new UdpClient(port);
-                }
-            }
+            _udpClient = new UdpClient(AddressFamily.InterNetworkV6);
+            _udpClient.Client.DualMode = true;
+            _udpClient.Client.Bind(new IPEndPoint(IPAddress.IPv6Any, port));
         }
         catch
         {
-            try
-            {
-                _udpClient = new UdpClient(AddressFamily.InterNetworkV6);
-                _udpClient.Client.DualMode = true;
-                _udpClient.Client.Bind(new IPEndPoint(IPAddress.IPv6Any, port));
-            }
-            catch
-            {
-                _udpClient = new UdpClient(port);
-            }
+            _udpClient = new UdpClient(port);
         }
+        _localId = localId;
+        _cts = new CancellationTokenSource();
     }
 
     public void RegisterStunRequest(byte[] transactionId, TaskCompletionSource<byte[]> tcs)
@@ -117,37 +92,51 @@ public class UdpHolePuncher : IDisposable
                 
                 if (remoteEpV6 != null)
                 {
-                    await _udpClient.SendAsync(punchData, punchData.Length, remoteEpV6);
-                    if (predictPorts)
+                    try
                     {
-                        for (int delta = 1; delta <= 8; delta++)
+                        await _udpClient.SendAsync(punchData, punchData.Length, remoteEpV6);
+                        if (predictPorts)
                         {
-                            var predictedEp = new IPEndPoint(remoteEpV6.Address, remoteEpV6.Port + delta);
-                            await _udpClient.SendAsync(punchData, punchData.Length, predictedEp);
+                            for (int delta = 1; delta <= 8; delta++)
+                            {
+                                var predictedEp = new IPEndPoint(remoteEpV6.Address, remoteEpV6.Port + delta);
+                                await _udpClient.SendAsync(punchData, punchData.Length, predictedEp);
+                            }
+                            for (int delta = 1; delta <= 3; delta++)
+                            {
+                                var predictedEp = new IPEndPoint(remoteEpV6.Address, remoteEpV6.Port - delta);
+                                await _udpClient.SendAsync(punchData, punchData.Length, predictedEp);
+                            }
                         }
-                        for (int delta = 1; delta <= 3; delta++)
-                        {
-                            var predictedEp = new IPEndPoint(remoteEpV6.Address, remoteEpV6.Port - delta);
-                            await _udpClient.SendAsync(punchData, punchData.Length, predictedEp);
-                        }
+                    }
+                    catch
+                    {
+                        // Ignore link-local / virtual IPv6 routing exceptions so IPv4 punch can proceed
                     }
                     // 给 IPv6 分配 30ms 的打洞领先权 (Happy Eyeballs 延迟偏好)
                     await Task.Delay(30, _cts.Token);
                 }
                 
-                await _udpClient.SendAsync(punchData, punchData.Length, remoteEp);
-                if (predictPorts)
+                try
                 {
-                    for (int delta = 1; delta <= 8; delta++)
+                    await _udpClient.SendAsync(punchData, punchData.Length, remoteEp);
+                    if (predictPorts)
                     {
-                        var predictedEp = new IPEndPoint(remoteEp.Address, remoteEp.Port + delta);
-                        await _udpClient.SendAsync(punchData, punchData.Length, predictedEp);
+                        for (int delta = 1; delta <= 8; delta++)
+                        {
+                            var predictedEp = new IPEndPoint(remoteEp.Address, remoteEp.Port + delta);
+                            await _udpClient.SendAsync(punchData, punchData.Length, predictedEp);
+                        }
+                        for (int delta = 1; delta <= 3; delta++)
+                        {
+                            var predictedEp = new IPEndPoint(remoteEp.Address, remoteEp.Port - delta);
+                            await _udpClient.SendAsync(punchData, punchData.Length, predictedEp);
+                        }
                     }
-                    for (int delta = 1; delta <= 3; delta++)
-                    {
-                        var predictedEp = new IPEndPoint(remoteEp.Address, remoteEp.Port - delta);
-                        await _udpClient.SendAsync(punchData, punchData.Length, predictedEp);
-                    }
+                }
+                catch (Exception exV4)
+                {
+                    OnError?.Invoke($"IPv4 punch send error: {exV4.Message}");
                 }
                 
                 var delay = intervalMs - (remoteEpV6 != null ? 30 : 0);
