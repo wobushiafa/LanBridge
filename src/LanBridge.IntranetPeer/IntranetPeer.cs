@@ -21,6 +21,7 @@ public class PeerConfig
     public int TargetSourcePort { get; set; } = 554;
     public bool Verbose { get; set; }
     public bool EnableKcpCongestionControl { get; set; } = false;
+    public string LocalBindIp { get; set; } = string.Empty;
     public List<TargetEndpoint> AllowedTargets { get; set; } = new();
     public List<AllowedSubnet> AllowedSubnets { get; set; } = new();
 }
@@ -120,7 +121,8 @@ public class IntranetPeer : IDisposable
             Token = _config.Token,
             UdpPort = _config.UdpPort,
             Verbose = _config.Verbose,
-            EnableKcpCongestionControl = _config.EnableKcpCongestionControl
+            EnableKcpCongestionControl = _config.EnableKcpCongestionControl,
+            LocalBindIp = _config.LocalBindIp
         });
         _connection.OnStatusChanged += status => OnStatusChanged?.Invoke(status);
         _connection.OnSessionDataReceived += (sessionId, data, length) => _ = HandleTunnelFrameAsync(sessionId, data, length);

@@ -21,6 +21,7 @@ public class ClientConfig
     public bool EnableRelayFallback { get; set; } = true;
     public bool Verbose { get; set; }
     public bool EnableKcpCongestionControl { get; set; } = false;
+    public string LocalBindIp { get; set; } = string.Empty;
     public List<TunnelMapping> Mappings { get; set; } = new();
 }
 
@@ -96,7 +97,8 @@ public class ExtranetPeer : IDisposable
             HolePunchTimeoutMs = _config.HolePunchTimeoutMs,
             EnableRelayFallback = _config.EnableRelayFallback,
             Verbose = _config.Verbose,
-            EnableKcpCongestionControl = _config.EnableKcpCongestionControl
+            EnableKcpCongestionControl = _config.EnableKcpCongestionControl,
+            LocalBindIp = _config.LocalBindIp
         });
         _connection.OnStatusChanged += HandleConnectionStatus;
         _connection.OnModeChanged += HandleTransportModeChanged;
