@@ -1,8 +1,10 @@
 using System;
 using System.Collections.Generic;
 using System.Threading;
+using LanBridge.Common.Configuration;
 using LanBridge.Common.Kcp;
 using LanBridge.Common.Network;
+using LanBridge.Common.Protocol;
 
 namespace LanBridge.KcpTest;
 
@@ -10,7 +12,16 @@ class Program
 {
     static void Main(string[] args)
     {
+        var smokeOnly = Array.Exists(args, arg => string.Equals(arg, "--smoke-only", StringComparison.OrdinalIgnoreCase));
         VerifyImplementation();
+        RunProtocolSmokeTests();
+        if (smokeOnly)
+        {
+            Console.ForegroundColor = ConsoleColor.Green;
+            Console.WriteLine("[Smoke] All smoke tests passed.");
+            Console.ResetColor();
+            return;
+        }
 
         Console.ForegroundColor = ConsoleColor.Cyan;
         Console.WriteLine("======================================================================");
@@ -233,6 +244,33 @@ class Program
         Console.WriteLine();
     }
 
+    private static void RunProtocolSmokeTests()
+    {
+        Console.ForegroundColor = ConsoleColor.Green;
+        Console.WriteLine("[Smoke] Running protocol and configuration smoke tests...");
+        Console.ResetColor();
+
+        Expect(TargetDescriptorParser.TryParse("192.168.1.10:554:udp", out var targetDescriptor), "Target descriptor parsing failed.");
+        Expect(targetDescriptor.Protocol == "udp", "Target descriptor protocol mismatch.");
+        Expect(targetDescriptor.ToString() == "192.168.1.10:554:udp", "Target descriptor formatting mismatch.");
+        Console.WriteLine("  [Pass] Target descriptor parsing verified.");
+
+        Expect(CidrMatcher.IsInCidr(System.Net.IPAddress.Parse("192.168.1.42"), "192.168.1.0/24"), "CIDR matcher failed positive case.");
+        Expect(!CidrMatcher.IsInCidr(System.Net.IPAddress.Parse("10.0.0.42"), "192.168.1.0/24"), "CIDR matcher failed negative case.");
+        Console.WriteLine("  [Pass] CIDR matching verified.");
+
+        var transactionId = new byte[] { 1, 3, 3, 7, 9, 9, 2, 4, 6, 8, 1, 2 };
+        var requestBytes = StunProtocol.CreateBindingRequest(changePort: true, transactionId: transactionId);
+        Expect(StunProtocol.TryParseBindingRequest(requestBytes, out var bindingRequest), "Failed to parse STUN binding request.");
+        Expect(bindingRequest.ChangePort, "STUN ChangePort flag missing.");
+
+        var endpoint = new System.Net.IPEndPoint(System.Net.IPAddress.Parse("203.0.113.10"), 45000);
+        var responseBytes = StunProtocol.CreateBindingSuccessResponse(transactionId, endpoint);
+        Expect(StunProtocol.TryParseBindingSuccessResponse(responseBytes, transactionId, out var decodedEndPoint), "Failed to parse STUN binding response.");
+        Expect(endpoint.Equals(decodedEndPoint), "Decoded STUN endpoint mismatch.");
+        Console.WriteLine("  [Pass] STUN request/response verified.");
+    }
+
     private static void VerifyImplementation()
     {
         Console.ForegroundColor = ConsoleColor.Green;
@@ -292,6 +330,14 @@ class Program
         }
 
         Console.WriteLine("  [Pass] MessageJsonContext AOT serialization verified.");
+    }
+
+    private static void Expect(bool condition, string message)
+    {
+        if (!condition)
+        {
+            throw new Exception(message);
+        }
     }
 
     private static void RunLanDiscoveryTest()

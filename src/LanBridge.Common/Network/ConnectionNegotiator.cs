@@ -1,7 +1,6 @@
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
-using System.Text.Json;
 using System.Collections.Concurrent;
 using LanBridge.Common.Protocol;
 
@@ -34,10 +33,12 @@ public sealed class PeerConnectionOptions
 public sealed class ConnectionNegotiator : IDisposable
 {
     private readonly PeerConnectionOptions _options;
+    private readonly PeerNatDiagnostics _natDiagnostics;
+    private readonly SignalingMessageRouter _signalingMessageRouter;
     private readonly ConcurrentDictionary<string, PeerTransportSession> _sessions = new();
     private readonly ConcurrentDictionary<string, PendingPunch> _pendingPunches = new();
     private readonly SemaphoreSlim _connectionRequestLock = new(1, 1);
-    private SignalingClient? _signalingClient;
+    private readonly SignalingConnectionLoop _signalingConnectionLoop;
     private UdpHolePuncher? _holePuncher;
     private LanDiscoveryService? _lanDiscovery;
     private IPEndPoint? _publicEndPoint;
@@ -59,11 +60,25 @@ public sealed class ConnectionNegotiator : IDisposable
     public IPEndPoint? PublicEndPoint => _publicEndPoint;
     public PeerTransportMode Mode => GetSession(_activeSessionId).Mode;
     public bool IsConnected => GetSession(_activeSessionId).IsConnected;
-    public bool IsSignalingConnected => _signalingClient?.IsConnected == true;
+    public bool IsSignalingConnected => _signalingConnectionLoop.IsConnected;
 
     public ConnectionNegotiator(PeerConnectionOptions options)
     {
         _options = options;
+        _natDiagnostics = new PeerNatDiagnostics(options, status => OnStatusChanged?.Invoke(status));
+        _signalingMessageRouter = new SignalingMessageRouter(
+            status => OnStatusChanged?.Invoke(status),
+            HandleConnectReadyAsync,
+            HandleHolePunchStartAsync,
+            HandleRelayAcceptAsync,
+            HandleErrorAsync);
+        _signalingConnectionLoop = new SignalingConnectionLoop(
+            _options.SignalingServerHost,
+            _options.SignalingServerPort,
+            status => OnStatusChanged?.Invoke(status),
+            () => OnSignalingDisconnected?.Invoke(),
+            message => _signalingMessageRouter.DispatchAsync(message),
+            HandleSignalingConnectedAsync);
     }
 
     private sealed record PendingPunch(string SessionId, uint Conv);
@@ -115,25 +130,13 @@ public sealed class ConnectionNegotiator : IDisposable
 
         if (_options.Role == PeerConnectionRole.Extranet)
         {
-            // Initiate parallel local LAN discovery broadcast/multicast queries
-            var clientPort = _holePuncher.LocalEndPoint?.Port ?? 0;
-            var tempConv = (uint)Random.Shared.Next(100000, 99999999);
-            _ = Task.Run(async () =>
-            {
-                // Send query 3 times with 100ms interval for maximum packet delivery likelihood in LAN
-                for (int i = 0; i < 3; i++)
-                {
-                    if (IsConnected) break;
-                    await _lanDiscovery.BroadcastQueryAsync(_options.TargetNodeId, clientPort, tempConv);
-                    await Task.Delay(100);
-                }
-            });
+            StartLanDiscoveryBroadcast();
         }
 
         await DetectNatAsync();
 
         // Start signaling connection manager loop in background
-        _ = Task.Run(SignalingConnectionManagerLoopAsync, _cts.Token);
+        _ = Task.Run(() => _signalingConnectionLoop.RunAsync(_cts.Token), _cts.Token);
     }
 
     private void StartNatKeepAliveLoop()
@@ -149,57 +152,19 @@ public sealed class ConnectionNegotiator : IDisposable
         }
         _isNatKeepAliveRunning = true;
 
-        _ = Task.Run(async () =>
+        _ = _natDiagnostics.RunKeepAliveLoopAsync(
+            _holePuncher!,
+            _cts.Token,
+            shouldProbe: () => IsSignalingConnected && !IsConnected && !_isHolePunching,
+            currentPublicEndPointProvider: () => _publicEndPoint,
+            onMappingChangedAsync: async endpoint =>
+            {
+                _publicEndPoint = endpoint;
+                await RegisterNodeAsync();
+            }).ContinueWith(_ =>
         {
-            try
-            {
-                using var timer = new PeriodicTimer(TimeSpan.FromSeconds(25));
-                while (await timer.WaitForNextTickAsync(_cts.Token))
-                {
-                    if (_cts.IsCancellationRequested)
-                    {
-                        break;
-                    }
-
-                    if (!IsSignalingConnected)
-                    {
-                        continue;
-                    }
-
-                    if (IsConnected || _isHolePunching)
-                    {
-                        continue;
-                    }
-
-                    try
-                    {
-                        var result = await StunClient.QueryAsync(
-                            _holePuncher!,
-                            _options.StunServerHost,
-                            _options.StunServerPort,
-                            timeoutMs: 2000);
-                            
-                        if (result.PublicEndPoint != null && !result.PublicEndPoint.Equals(_publicEndPoint))
-                        {
-                            OnStatusChanged?.Invoke($"NAT mapping changed from {_publicEndPoint} to {result.PublicEndPoint}. Re-registering...");
-                            _publicEndPoint = result.PublicEndPoint;
-                            await RegisterNodeAsync();
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        if (_options.Verbose)
-                        {
-                            OnStatusChanged?.Invoke($"NAT keep-alive failed: {ex.Message}");
-                        }
-                    }
-                }
-            }
-            finally
-            {
-                _isNatKeepAliveRunning = false;
-            }
-        }, _cts.Token);
+            _isNatKeepAliveRunning = false;
+        }, CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default);
     }
 
     public async Task<bool> EnsureConnectedAsync(TimeSpan timeout, CancellationToken cancellationToken)
@@ -302,7 +267,7 @@ public sealed class ConnectionNegotiator : IDisposable
             return;
         }
 
-        if (_signalingClient?.IsConnected != true)
+        if (_signalingConnectionLoop.Client?.IsConnected != true)
         {
             return;
         }
@@ -323,7 +288,7 @@ public sealed class ConnectionNegotiator : IDisposable
                 NatType = _natDetection?.NatType ?? StunNatType.Unknown
             };
 
-            await _signalingClient.SendAsync(MessageSerializer.SerializeToString(request));
+            await _signalingConnectionLoop.Client.SendAsync(MessageSerializer.SerializeToString(request));
             _lastConnectionRequestUtc = DateTime.UtcNow;
             OnStatusChanged?.Invoke($"Connection requested to {_options.TargetNodeId}");
         }
@@ -335,195 +300,10 @@ public sealed class ConnectionNegotiator : IDisposable
 
     private async Task DetectNatAsync()
     {
-        OnStatusChanged?.Invoke("Getting public endpoint via standard STUN...");
-        OnStatusChanged?.Invoke($"STUN server: {_options.StunServerHost}:{_options.StunServerPort}");
-        var holePuncher = _holePuncher!;
-        OnStatusChanged?.Invoke($"Local endpoint: {holePuncher.LocalEndPoint}");
-
-        var result = await StunClient.DetectNatAsync(
-            holePuncher,
-            _options.StunServerHost,
-            _options.StunServerPort,
-            _options.StunAlternateServerPort);
-
-        _natDetection = result;
-        _publicEndPoint = result.PublicEndPoint;
-
-        try
-        {
-            _publicEndPointV6 = await StunClient.QueryPublicEndPointV6Async(
-                holePuncher,
-                _options.StunServerHost,
-                _options.StunServerPort,
-                timeoutMs: 2000);
-            if (_publicEndPointV6 != null)
-            {
-                OnStatusChanged?.Invoke($"IPv6 public endpoint: {_publicEndPointV6}");
-            }
-        }
-        catch (Exception ex)
-        {
-            if (_options.Verbose)
-            {
-                OnStatusChanged?.Invoke($"IPv6 STUN query failed: {ex.Message}");
-            }
-        }
-
-        if (_publicEndPoint == null && _publicEndPointV6 == null)
-        {
-            OnStatusChanged?.Invoke("Configured STUN server is unavailable. Attempting fallback to public Google STUN server (stun.l.google.com:19302)...");
-            try
-            {
-                var fallbackResult = await StunClient.QueryAsync(holePuncher, "stun.l.google.com", 19302, timeoutMs: 2500);
-                _publicEndPoint = fallbackResult.PublicEndPoint;
-                _natDetection = new NatDetectionResult(
-                    StunNatType.Unknown,
-                    "NAT classified via Google STUN fallback",
-                    _publicEndPoint,
-                    null,
-                    fallbackResult.PublicEndPoint.Port == (holePuncher.LocalEndPoint?.Port ?? 0));
-                
-                var mapping = _natDetection.PortPreserved ? "port-preserved" : "port-mapped";
-                OnStatusChanged?.Invoke($"Public endpoint (IPv4) via Google STUN: {_publicEndPoint}");
-                OnStatusChanged?.Invoke($"NAT mapping: {holePuncher.LocalEndPoint} -> {_publicEndPoint} ({mapping})");
-            }
-            catch (Exception fallbackEx)
-            {
-                if (_options.Verbose)
-                {
-                    OnStatusChanged?.Invoke($"IPv4 STUN Fallback to Google failed: {fallbackEx.Message}");
-                }
-            }
-
-            try
-            {
-                _publicEndPointV6 = await StunClient.QueryPublicEndPointV6Async(
-                    holePuncher,
-                    "stun.l.google.com",
-                    19302,
-                    timeoutMs: 2500);
-                if (_publicEndPointV6 != null)
-                {
-                    OnStatusChanged?.Invoke($"IPv6 public endpoint via Google STUN: {_publicEndPointV6}");
-                }
-            }
-            catch (Exception fallbackExV6)
-            {
-                if (_options.Verbose)
-                {
-                    OnStatusChanged?.Invoke($"IPv6 STUN Fallback to Google failed: {fallbackExV6.Message}");
-                }
-            }
-        }
-
-        if (_publicEndPoint == null && _publicEndPointV6 == null)
-        {
-            OnStatusChanged?.Invoke($"STUN unavailable (both v4/v6) after Google STUN fallback, continuing with relay fallback: {result.Reason}");
-            return;
-        }
-
-        if (_publicEndPoint != null && result.PublicEndPoint != null)
-        {
-            var mapping = result.PortPreserved ? "port-preserved" : "port-mapped";
-            OnStatusChanged?.Invoke($"Public endpoint (IPv4): {_publicEndPoint}");
-            OnStatusChanged?.Invoke($"NAT mapping: {holePuncher.LocalEndPoint} -> {_publicEndPoint} ({mapping})");
-            OnStatusChanged?.Invoke($"NAT type: {FormatNatType(result.NatType)}");
-            OnStatusChanged?.Invoke($"NAT diagnosis: {result.Reason}");
-        }
-    }
-
-    private static string FormatNatType(StunNatType natType)
-    {
-        return natType switch
-        {
-            StunNatType.FullCone => "Full Cone",
-            StunNatType.RestrictedCone => "Restricted Cone",
-            StunNatType.PortRestrictedCone => "Port Restricted Cone",
-            StunNatType.Symmetric => "Symmetric",
-            StunNatType.Blocked => "Blocked",
-            _ => "Unknown"
-        };
-    }
-
-    private async Task SignalingConnectionManagerLoopAsync()
-    {
-        while (!_cts.IsCancellationRequested)
-        {
-            if (IsSignalingConnected)
-            {
-                try
-                {
-                    await Task.Delay(2000, _cts.Token);
-                }
-                catch (OperationCanceledException)
-                {
-                    break;
-                }
-                continue;
-            }
-
-            // Clean up any old instance
-            if (_signalingClient != null)
-            {
-                try
-                {
-                    _signalingClient.Dispose();
-                }
-                catch { }
-                _signalingClient = null;
-            }
-
-            try
-            {
-                OnStatusChanged?.Invoke("Connecting to signaling server...");
-                _signalingClient = new SignalingClient(_options.SignalingServerHost, _options.SignalingServerPort);
-                _signalingClient.OnMessageReceived += HandleSignalingMessage;
-                _signalingClient.OnDisconnected += () =>
-                {
-                    OnSignalingDisconnected?.Invoke();
-                    OnStatusChanged?.Invoke("Disconnected from signaling server");
-                };
-                _signalingClient.OnError += error => OnStatusChanged?.Invoke($"Signaling error: {error}");
-
-                await _signalingClient.ConnectAsync();
-                OnStatusChanged?.Invoke("Connected to signaling server");
-
-                if (_options.Role == PeerConnectionRole.Intranet)
-                {
-                    await RegisterNodeAsync();
-                    OnStatusChanged?.Invoke("Ready");
-                    StartNatKeepAliveLoop();
-                }
-                else
-                {
-                    await RequestConnectionAsync(force: true);
-                }
-            }
-            catch (Exception ex)
-            {
-                OnStatusChanged?.Invoke($"Failed to connect to signaling server: {ex.Message}. Retrying in 5 seconds...");
-                
-                // Clean up in case of failed connect
-                if (_signalingClient != null)
-                {
-                    try
-                    {
-                        _signalingClient.Dispose();
-                    }
-                    catch { }
-                    _signalingClient = null;
-                }
-
-                try
-                {
-                    await Task.Delay(5000, _cts.Token);
-                }
-                catch (OperationCanceledException)
-                {
-                    break;
-                }
-            }
-        }
+        var snapshot = await _natDiagnostics.DetectAsync(_holePuncher!);
+        _natDetection = snapshot.Detection;
+        _publicEndPoint = snapshot.PublicEndPoint;
+        _publicEndPointV6 = snapshot.PublicEndPointV6;
     }
 
     private async Task RegisterNodeAsync()
@@ -537,40 +317,7 @@ public sealed class ConnectionNegotiator : IDisposable
             NatType = _natDetection?.NatType ?? StunNatType.Unknown
         };
 
-        await _signalingClient!.SendAsync(MessageSerializer.SerializeToString(register));
-    }
-
-    private async void HandleSignalingMessage(string message)
-    {
-        var baseMessage = MessageSerializer.Deserialize(message);
-        if (baseMessage == null)
-        {
-            return;
-        }
-
-        switch (baseMessage.Type)
-        {
-            case MessageType.RegisterAck:
-                var ack = (RegisterAck)baseMessage;
-                OnStatusChanged?.Invoke($"Registration {(ack.Success ? "success" : "failed")}: {ack.Message}");
-                break;
-
-            case MessageType.ConnectReady:
-                await HandleConnectReadyAsync((ConnectReady)baseMessage);
-                break;
-
-            case MessageType.HolePunchStart:
-                await HandleHolePunchStartAsync((HolePunchStart)baseMessage);
-                break;
-
-            case MessageType.RelayAccept:
-                await HandleRelayAcceptAsync((RelayAccept)baseMessage);
-                break;
-
-            case MessageType.Error:
-                await HandleErrorAsync((ErrorMessage)baseMessage);
-                break;
-        }
+        await _signalingConnectionLoop.Client!.SendAsync(MessageSerializer.SerializeToString(register));
     }
 
     private async Task HandleConnectReadyAsync(ConnectReady message)
@@ -582,38 +329,14 @@ public sealed class ConnectionNegotiator : IDisposable
 
         var sessionId = string.IsNullOrWhiteSpace(message.SessionId) ? _activeSessionId : message.SessionId;
         _activeSessionId = sessionId;
-        
-        var target = _options.Role == PeerConnectionRole.Intranet
-            ? message.ExtranetEndPoint
-            : message.IntranetEndPoint;
 
-        var targetV6 = _options.Role == PeerConnectionRole.Intranet
-            ? message.ExtranetEndPointV6
-            : message.IntranetEndPointV6;
-
-        if (string.IsNullOrWhiteSpace(target) && string.IsNullOrWhiteSpace(targetV6))
-        {
-            OnStatusChanged?.Invoke("No remote UDP endpoint available. Falling back to relay...");
-            await RequestRelayIfAllowedAsync();
-            return;
-        }
-
-        IPEndPoint? targetEp = null;
-        if (!string.IsNullOrWhiteSpace(target) && IPEndPoint.TryParse(target, out var parsedEp))
-        {
-            targetEp = parsedEp;
-        }
-
-        IPEndPoint? targetEpV6 = null;
-        if (!string.IsNullOrWhiteSpace(targetV6) && IPEndPoint.TryParse(targetV6, out var parsedEpV6))
-        {
-            targetEpV6 = parsedEpV6;
-        }
-
-        var displayTarget = targetEpV6 != null ? $"{targetEp} / {targetEpV6}" : targetEp?.ToString() ?? string.Empty;
-        OnStatusChanged?.Invoke($"Connection ready. Starting hole punch to {displayTarget}");
-        
-        await StartHolePunchAsync(sessionId, message.Conv, targetEp, targetEpV6, allowRelayFallback: _options.Role == PeerConnectionRole.Extranet, message.TargetNatType);
+        await BeginHolePunchFromSignalAsync(
+            sessionId,
+            _options.Role == PeerConnectionRole.Intranet ? message.ExtranetEndPoint : message.IntranetEndPoint,
+            _options.Role == PeerConnectionRole.Intranet ? message.ExtranetEndPointV6 : message.IntranetEndPointV6,
+            message.Conv,
+            message.TargetNatType,
+            $"Connection ready. Starting hole punch to {{0}}");
     }
 
     private async Task HandleHolePunchStartAsync(HolePunchStart message)
@@ -624,29 +347,14 @@ public sealed class ConnectionNegotiator : IDisposable
         }
 
         var sessionId = string.IsNullOrWhiteSpace(message.SessionId) ? Guid.NewGuid().ToString("N")[..8] : message.SessionId;
-        if (string.IsNullOrWhiteSpace(message.TargetEndPoint) && string.IsNullOrWhiteSpace(message.TargetEndPointV6))
-        {
-            OnStatusChanged?.Invoke("No target UDP endpoint available. Falling back to relay...");
-            await RequestRelayIfAllowedAsync();
-            return;
-        }
 
-        IPEndPoint? targetEp = null;
-        if (!string.IsNullOrWhiteSpace(message.TargetEndPoint) && IPEndPoint.TryParse(message.TargetEndPoint, out var parsedEp))
-        {
-            targetEp = parsedEp;
-        }
-
-        IPEndPoint? targetEpV6 = null;
-        if (!string.IsNullOrWhiteSpace(message.TargetEndPointV6) && IPEndPoint.TryParse(message.TargetEndPointV6, out var parsedEpV6))
-        {
-            targetEpV6 = parsedEpV6;
-        }
-
-        var displayTarget = targetEpV6 != null ? $"{targetEp} / {targetEpV6}" : targetEp?.ToString() ?? string.Empty;
-        OnStatusChanged?.Invoke($"Hole punch request to {displayTarget}");
-        
-        await StartHolePunchAsync(sessionId, message.Conv, targetEp, targetEpV6, allowRelayFallback: _options.Role == PeerConnectionRole.Extranet, message.TargetNatType);
+        await BeginHolePunchFromSignalAsync(
+            sessionId,
+            message.TargetEndPoint,
+            message.TargetEndPointV6,
+            message.Conv,
+            message.TargetNatType,
+            $"Hole punch request to {{0}}");
     }
 
     private async Task StartHolePunchAsync(string sessionId, uint conv, IPEndPoint? targetEndPoint, IPEndPoint? targetEndPointV6, bool allowRelayFallback, StunNatType targetNatType)
@@ -769,21 +477,7 @@ public sealed class ConnectionNegotiator : IDisposable
 
     private string ExplainP2pFailure()
     {
-        if (_natDetection == null)
-        {
-            return "NAT was not detected because STUN did not complete; relay is the safest fallback";
-        }
-
-        return _natDetection.NatType switch
-        {
-            StunNatType.Symmetric => "Symmetric NAT changed the public mapping across STUN endpoints, so peer-predicted UDP ports are unreliable; use relay/TURN-like fallback",
-            StunNatType.PortRestrictedCone => "Port-restricted filtering likely blocked packets from the peer until both sides punch at the same time; retry may work, relay is expected fallback",
-            StunNatType.Blocked => "STUN binding failed, so UDP traversal is blocked or unreachable; relay is required",
-            StunNatType.Unknown => $"NAT type is unknown: {_natDetection.Reason}; relay fallback is recommended",
-            StunNatType.RestrictedCone => "NAT looked traversal-friendly, so failure is likely firewall filtering, endpoint mismatch, packet loss, or peer offline",
-            StunNatType.FullCone => "NAT looked traversal-friendly, so failure is likely firewall filtering, endpoint mismatch, packet loss, or peer offline",
-            _ => _natDetection.Reason
-        };
+        return P2pFailureExplainer.Describe(_natDetection);
     }
 
     private async Task HandleRelayAcceptAsync(RelayAccept message)
@@ -832,7 +526,7 @@ public sealed class ConnectionNegotiator : IDisposable
 
     private async Task RequestRelayAsync()
     {
-        if (_signalingClient?.IsConnected != true || string.IsNullOrWhiteSpace(_options.TargetNodeId))
+        if (_signalingConnectionLoop.Client?.IsConnected != true || string.IsNullOrWhiteSpace(_options.TargetNodeId))
         {
             return;
         }
@@ -843,7 +537,7 @@ public sealed class ConnectionNegotiator : IDisposable
             SessionId = _activeSessionId
         };
 
-        await _signalingClient.SendAsync(MessageSerializer.SerializeToString(request));
+        await _signalingConnectionLoop.Client.SendAsync(MessageSerializer.SerializeToString(request));
     }
 
     private void StartRelayProbeLoop()
@@ -885,6 +579,64 @@ public sealed class ConnectionNegotiator : IDisposable
         }, token);
     }
 
+    private void StartLanDiscoveryBroadcast()
+    {
+        var clientPort = _holePuncher!.LocalEndPoint?.Port ?? 0;
+        var tempConv = (uint)Random.Shared.Next(100000, 99999999);
+        _ = Task.Run(async () =>
+        {
+            for (var i = 0; i < 3; i++)
+            {
+                if (IsConnected)
+                {
+                    break;
+                }
+
+                await _lanDiscovery!.BroadcastQueryAsync(_options.TargetNodeId, clientPort, tempConv);
+                await Task.Delay(100);
+            }
+        });
+    }
+
+    private async Task BeginHolePunchFromSignalAsync(
+        string sessionId,
+        string? target,
+        string? targetV6,
+        uint conv,
+        StunNatType targetNatType,
+        string statusFormat)
+    {
+        if (string.IsNullOrWhiteSpace(target) && string.IsNullOrWhiteSpace(targetV6))
+        {
+            OnStatusChanged?.Invoke("No remote UDP endpoint available. Falling back to relay...");
+            await RequestRelayIfAllowedAsync();
+            return;
+        }
+
+        var targetEp = TryParseEndPoint(target);
+        var targetEpV6 = TryParseEndPoint(targetV6);
+        var displayTarget = targetEpV6 != null ? $"{targetEp} / {targetEpV6}" : targetEp?.ToString() ?? string.Empty;
+        OnStatusChanged?.Invoke(string.Format(statusFormat, displayTarget));
+
+        await StartHolePunchAsync(
+            sessionId,
+            conv,
+            targetEp,
+            targetEpV6,
+            allowRelayFallback: _options.Role == PeerConnectionRole.Extranet,
+            targetNatType);
+    }
+
+    private static IPEndPoint? TryParseEndPoint(string? value)
+    {
+        if (!string.IsNullOrWhiteSpace(value) && IPEndPoint.TryParse(value, out var parsed))
+        {
+            return parsed;
+        }
+
+        return null;
+    }
+
     public void Dispose()
     {
         try { _cts.Cancel(); } catch { }
@@ -892,7 +644,7 @@ public sealed class ConnectionNegotiator : IDisposable
         _connectionRequestLock.Dispose();
         _relayProbeCts?.Cancel();
         _relayProbeCts?.Dispose();
-        _signalingClient?.Dispose();
+        _signalingConnectionLoop.Dispose();
         _holePuncher?.Dispose();
         _lanDiscovery?.Dispose();
         foreach (var session in _sessions.Values)
@@ -900,5 +652,19 @@ public sealed class ConnectionNegotiator : IDisposable
             session.Dispose();
         }
         _sessions.Clear();
+    }
+
+    private async Task HandleSignalingConnectedAsync(SignalingClient client)
+    {
+        if (_options.Role == PeerConnectionRole.Intranet)
+        {
+            await RegisterNodeAsync();
+            OnStatusChanged?.Invoke("Ready");
+            StartNatKeepAliveLoop();
+        }
+        else
+        {
+            await RequestConnectionAsync(force: true);
+        }
     }
 }

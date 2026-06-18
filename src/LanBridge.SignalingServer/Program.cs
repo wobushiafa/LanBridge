@@ -1,4 +1,6 @@
 using LanBridge.Common.Protocol;
+using LanBridge.Common.Diagnostics;
+using LanBridge.Common.Runtime;
 
 namespace LanBridge.SignalingServer;
 
@@ -11,22 +13,27 @@ public class Program
     private static StunService? _stunService;
     private static SignalingService? _signalingService;
     private static RelayService? _relayService;
+    private static readonly OperationalTelemetry Telemetry = new();
     
     public static async Task Main(string[] args)
     {
-        Console.WriteLine("=== LanBridge Signaling Server ===");
-        Console.WriteLine();
+        ConsoleStatusWriter.WriteHeader("LanBridge Signaling Server");
         
         _config = LoadConfig(args) ?? new ServerConfig();
         ParseArguments(args);
+        _config.Validate();
         
-        Console.WriteLine($"Configuration:");
-        Console.WriteLine($"  Signaling Port: {_config.SignalingPort}");
-        Console.WriteLine($"  STUN Port: {_config.StunPort}");
-        Console.WriteLine($"  STUN Alternate Port: {_config.StunAlternatePort}");
-        Console.WriteLine($"  Relay Port: {_config.RelayPort}");
-        Console.WriteLine($"  Max Relay Sessions: {_config.MaxRelaySessions}");
-        Console.WriteLine();
+        ConsoleStatusWriter.WriteConfiguration(new[]
+        {
+            ("Signaling Port", _config.SignalingPort.ToString()),
+            ("STUN Port", _config.StunPort.ToString()),
+            ("STUN Alternate Port", _config.StunAlternatePort.ToString()),
+            ("Relay Port", _config.RelayPort.ToString()),
+            ("Max Relay Sessions", _config.MaxRelaySessions.ToString()),
+            ("Relay Timeout", $"{_config.RelayTimeoutMs}ms"),
+            ("Require Registration Token", _config.RequireRegistrationToken ? "enabled" : "disabled"),
+            ("Metrics Interval", $"{_config.MetricsReportIntervalSeconds}s")
+        });
         
         // 启动服务
         using var cts = new CancellationTokenSource();
@@ -41,21 +48,21 @@ public class Program
         try
         {
             // 启动 STUN 服务
-            _stunService = new StunService(_config.StunPort, _config.StunAlternatePort);
+            _stunService = new StunService(_config.StunPort, _config.StunAlternatePort, Telemetry);
             _stunService.OnStunRequest += (msg, ep) =>
             {
-                Console.WriteLine($"[STUN] Request from {ep}");
+                ConsoleStatusWriter.WriteServerStatus("STUN", $"Request from {ep}", ConsoleColor.DarkCyan);
             };
             
             // 启动信令服务
-            _signalingService = new SignalingService(_config.SignalingPort, _config.RelayPort);
+            _signalingService = new SignalingService(_config, Telemetry);
             _signalingService.OnMessageReceived += (clientId, message) =>
             {
-                Console.WriteLine($"[Signaling] Message from {clientId}: {message.Type}");
+                ConsoleStatusWriter.WriteServerStatus("Signaling", $"Message from {clientId}: {message.Type}", ConsoleColor.DarkGray);
             };
             
             // 启动中转服务
-            _relayService = new RelayService(_config.RelayPort, _config.MaxRelaySessions);
+            _relayService = new RelayService(_config.RelayPort, _config.MaxRelaySessions, _config.RelayTimeoutMs, Telemetry);
             
             // 并行启动所有服务
             var tasks = new[]
@@ -64,8 +71,9 @@ public class Program
                 Task.Run(() => _signalingService.StartAsync()),
                 Task.Run(() => _relayService.StartAsync())
             };
+            var metricsTask = Task.Run(() => ReportMetricsLoopAsync(cts.Token));
             
-            Console.WriteLine("All services started. Press Ctrl+C to shutdown.");
+            ConsoleStatusWriter.WriteServerStatus("Server", "All services started. Press Ctrl+C to shutdown.", ConsoleColor.Green);
             Console.WriteLine();
             
             // 等待取消信号
@@ -84,11 +92,11 @@ public class Program
         }
         finally
         {
-            Console.WriteLine("Shutting down services...");
+            ConsoleStatusWriter.WriteServerStatus("Server", "Shutting down services...", ConsoleColor.Yellow);
             _stunService?.Dispose();
             _signalingService?.Dispose();
             _relayService?.Dispose();
-            Console.WriteLine("Server stopped.");
+            ConsoleStatusWriter.WriteServerStatus("Server", "Server stopped.", ConsoleColor.Yellow);
         }
     }
     
@@ -126,6 +134,25 @@ public class Program
                     if (i + 1 < args.Length && int.TryParse(args[++i], out int rp))
                         _config.RelayPort = rp;
                     break;
+
+                case "--relay-timeout":
+                    if (i + 1 < args.Length && int.TryParse(args[++i], out int relayTimeout))
+                        _config.RelayTimeoutMs = relayTimeout;
+                    break;
+
+                case "--require-token":
+                    _config.RequireRegistrationToken = true;
+                    break;
+
+                case "--registration-token":
+                    if (i + 1 < args.Length)
+                        _config.RegistrationTokens.Add(args[++i]);
+                    break;
+
+                case "--metrics-interval":
+                    if (i + 1 < args.Length && int.TryParse(args[++i], out int metricsInterval))
+                        _config.MetricsReportIntervalSeconds = metricsInterval;
+                    break;
                 
                 case "--help":
                 case "-h":
@@ -138,27 +165,16 @@ public class Program
 
     private static ServerConfig? LoadConfig(string[] args)
     {
-        var configPath = FindOptionValue(args, "--config", "-c");
-        if (string.IsNullOrWhiteSpace(configPath))
-        {
-            return null;
-        }
-
-        var json = File.ReadAllText(configPath);
-        return System.Text.Json.JsonSerializer.Deserialize(json, ServerConfigJsonContext.Default.ServerConfig);
+        return JsonConfigFile.Load(args, ServerConfigJsonContext.Default.ServerConfig, "--config", "-c");
     }
 
-    private static string? FindOptionValue(string[] args, string longName, string shortName)
+    private static async Task ReportMetricsLoopAsync(CancellationToken cancellationToken)
     {
-        for (var i = 0; i < args.Length - 1; i++)
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(_config.MetricsReportIntervalSeconds));
+        while (await timer.WaitForNextTickAsync(cancellationToken))
         {
-            if (args[i] == longName || args[i] == shortName)
-            {
-                return args[i + 1];
-            }
+            ConsoleStatusWriter.WriteServerStatus("Metrics", Telemetry.FormatSnapshot(), ConsoleColor.DarkGray);
         }
-
-        return null;
     }
     
     private static void PrintHelp()
@@ -170,6 +186,10 @@ public class Program
         Console.WriteLine("  --stun-port, -stun <port>      STUN server port (default: 9001)");
         Console.WriteLine("  --stun-alt-port <port>         Alternate STUN port for NAT detection (default: 9003)");
         Console.WriteLine("  --relay-port, -rp <port>       Relay server port (default: 9002)");
+        Console.WriteLine("  --relay-timeout <ms>           Relay idle timeout in ms (default: 30000)");
+        Console.WriteLine("  --require-token                Require registration token for intranet node registration");
+        Console.WriteLine("  --registration-token <token>   Add an allowed registration token (repeatable)");
+        Console.WriteLine("  --metrics-interval <sec>       Metrics reporting interval in seconds (default: 30)");
         Console.WriteLine("  --config, -c <path>            Load JSON config file");
         Console.WriteLine("  --help, -h                     Show this help");
     }

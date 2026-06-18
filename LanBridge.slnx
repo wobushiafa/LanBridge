@@ -3,6 +3,8 @@
     <Project Path="src/LanBridge.Common/LanBridge.Common.csproj" />
     <Project Path="src/LanBridge.ExtranetPeer/LanBridge.ExtranetPeer.csproj" />
     <Project Path="src/LanBridge.IntranetPeer/LanBridge.IntranetPeer.csproj" />
+    <Project Path="src/LanBridge.KcpTest/LanBridge.KcpTest.csproj" />
     <Project Path="src/LanBridge.SignalingServer/LanBridge.SignalingServer.csproj" />
+    <Project Path="src/LanBridge.Tests/LanBridge.Tests.csproj" />
   </Folder>
 </Solution>

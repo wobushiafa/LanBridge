@@ -1,3 +1,5 @@
+using LanBridge.Common.Runtime;
+
 namespace LanBridge.ExtranetPeer;
 
 /// <summary>
@@ -7,34 +9,34 @@ public class Program
 {
     public static async Task Main(string[] args)
     {
-        Console.WriteLine("=== LanBridge Extranet Client ===");
-        Console.WriteLine();
+        ConsoleStatusWriter.WriteHeader("LanBridge Extranet Client");
         
         var config = LoadConfig(args) ?? new ClientConfig();
         ParseArguments(args, config);
         EnsureDefaultMapping(config);
+        config.Validate();
         
-        Console.WriteLine($"Configuration:");
-        Console.WriteLine($"  Node ID: {config.NodeId}");
-        Console.WriteLine($"  Signaling Server: {config.SignalingServerHost}:{config.SignalingServerPort}");
-        Console.WriteLine($"  STUN Server: {config.StunServerHost}:{config.StunServerPort}");
-        Console.WriteLine($"  STUN Alternate Port: {config.StunAlternateServerPort}");
-        Console.WriteLine($"  Target Node: {config.TargetNodeId}");
-        Console.WriteLine($"  Local Proxy Port: {config.LocalProxyPort}");
-        foreach (var mapping in config.Mappings)
+        var configurationItems = new List<(string Label, string Value)>
         {
-            Console.WriteLine($"  Mapping: 127.0.0.1:{mapping.LocalPort} -> {(string.IsNullOrWhiteSpace(mapping.Target) ? "intranet default target" : mapping.Target)}");
-        }
-        Console.WriteLine($"  Hole Punch Timeout: {config.HolePunchTimeoutMs}ms");
-        Console.WriteLine($"  Relay Fallback: {(config.EnableRelayFallback ? "enabled" : "disabled")}");
-        Console.WriteLine($"  Verbose: {(config.Verbose ? "enabled" : "disabled")}");
-        Console.WriteLine();
+            ("Node ID", config.NodeId),
+            ("Signaling Server", $"{config.SignalingServerHost}:{config.SignalingServerPort}"),
+            ("STUN Server", $"{config.StunServerHost}:{config.StunServerPort}"),
+            ("STUN Alternate Port", config.StunAlternateServerPort.ToString()),
+            ("Target Node", config.TargetNodeId),
+            ("Local Proxy Port", config.LocalProxyPort.ToString()),
+            ("Hole Punch Timeout", $"{config.HolePunchTimeoutMs}ms"),
+            ("Relay Fallback", config.EnableRelayFallback ? "enabled" : "disabled"),
+            ("Verbose", config.Verbose ? "enabled" : "disabled")
+        };
+        configurationItems.AddRange(config.Mappings.Select(mapping =>
+            ("Mapping", $"127.0.0.1:{mapping.LocalPort} -> {(string.IsNullOrWhiteSpace(mapping.Target) ? "intranet default target" : mapping.Target)}")));
+        ConsoleStatusWriter.WriteConfiguration(configurationItems);
         
         using var peer = new ExtranetPeer(config);
         
         peer.OnStatusChanged += status =>
         {
-            WriteStatus(status);
+            ConsoleStatusWriter.WritePeerStatus(status);
         };
 
         var trafficLock = new object();
@@ -53,7 +55,7 @@ public class Program
 
                 var mode = peer.State == ConnectionState.RelayMode ? "RELAY" :
                     peer.State == ConnectionState.Connected ? "P2P" : peer.State.ToString();
-                WriteColored($"[{DateTime.Now:HH:mm:ss}] Traffic: {remoteBytes / 1024.0:F1} KB from remote via {mode}", ConsoleColor.DarkGray);
+                ConsoleStatusWriter.WriteColored($"[{DateTime.Now:HH:mm:ss}] Traffic: {remoteBytes / 1024.0:F1} KB from remote via {mode}", ConsoleColor.DarkGray);
                 remoteBytes = 0;
                 lastTrafficLog = DateTime.UtcNow;
             }
@@ -85,62 +87,6 @@ public class Program
         Console.WriteLine("Client stopped.");
     }
 
-    private static void WriteStatus(string status)
-    {
-        if (status.Contains("P2P connection established", StringComparison.OrdinalIgnoreCase))
-        {
-            WriteModeBanner("P2P DIRECT", ConsoleColor.Green);
-            WriteColored($"[{DateTime.Now:HH:mm:ss}] {status}", ConsoleColor.Green);
-            return;
-        }
-
-        if (status.Contains("Relay connection established", StringComparison.OrdinalIgnoreCase))
-        {
-            WriteModeBanner("RELAY MODE", ConsoleColor.Yellow);
-            WriteColored($"[{DateTime.Now:HH:mm:ss}] {status}", ConsoleColor.Yellow);
-            return;
-        }
-
-        if (status.Contains("relay", StringComparison.OrdinalIgnoreCase))
-        {
-            WriteColored($"[{DateTime.Now:HH:mm:ss}] {status}", ConsoleColor.Yellow);
-            return;
-        }
-
-        if (status.Contains("error", StringComparison.OrdinalIgnoreCase) ||
-            status.Contains("failed", StringComparison.OrdinalIgnoreCase) ||
-            status.Contains("timeout", StringComparison.OrdinalIgnoreCase))
-        {
-            WriteColored($"[{DateTime.Now:HH:mm:ss}] {status}", ConsoleColor.Red);
-            return;
-        }
-
-        if (status.StartsWith("State:", StringComparison.OrdinalIgnoreCase) ||
-            status.Contains("Hole punch", StringComparison.OrdinalIgnoreCase))
-        {
-            WriteColored($"[{DateTime.Now:HH:mm:ss}] {status}", ConsoleColor.Cyan);
-            return;
-        }
-
-        Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] {status}");
-    }
-
-    private static void WriteModeBanner(string mode, ConsoleColor color)
-    {
-        WriteColored("", color);
-        WriteColored("============================================================", color);
-        WriteColored($"  TRANSPORT MODE: {mode}", color);
-        WriteColored("============================================================", color);
-    }
-
-    private static void WriteColored(string message, ConsoleColor color)
-    {
-        var originalColor = Console.ForegroundColor;
-        Console.ForegroundColor = color;
-        Console.WriteLine(message);
-        Console.ForegroundColor = originalColor;
-    }
-    
     private static void ParseArguments(string[] args, ClientConfig config)
     {
         for (int i = 0; i < args.Length; i++)
@@ -238,27 +184,7 @@ public class Program
 
     private static ClientConfig? LoadConfig(string[] args)
     {
-        var configPath = FindOptionValue(args, "--config", "-c");
-        if (string.IsNullOrWhiteSpace(configPath))
-        {
-            return null;
-        }
-
-        var json = File.ReadAllText(configPath);
-        return System.Text.Json.JsonSerializer.Deserialize(json, ExtranetConfigJsonContext.Default.ClientConfig);
-    }
-
-    private static string? FindOptionValue(string[] args, string longName, string shortName)
-    {
-        for (var i = 0; i < args.Length - 1; i++)
-        {
-            if (args[i] == longName || args[i] == shortName)
-            {
-                return args[i + 1];
-            }
-        }
-
-        return null;
+        return JsonConfigFile.Load(args, ExtranetConfigJsonContext.Default.ClientConfig, "--config", "-c");
     }
 
     private static void EnsureDefaultMapping(ClientConfig config)
@@ -286,37 +212,7 @@ public class Program
         }
 
         var targetPart = value[(equalsIndex + 1)..];
-        var parts = targetPart.Split(':');
-        if (parts.Length < 2)
-        {
-            return false;
-        }
-
-        string protocol = "tcp";
-        int targetPort;
-        string targetHost;
-
-        var lastPart = parts[^1];
-        if (string.Equals(lastPart, "udp", StringComparison.OrdinalIgnoreCase) ||
-            string.Equals(lastPart, "tcp", StringComparison.OrdinalIgnoreCase))
-        {
-            protocol = lastPart.ToLowerInvariant();
-            if (parts.Length < 3 || !int.TryParse(parts[^2], out targetPort))
-            {
-                return false;
-            }
-            targetHost = string.Join(":", parts[..^2]);
-        }
-        else
-        {
-            if (!int.TryParse(lastPart, out targetPort))
-            {
-                return false;
-            }
-            targetHost = string.Join(":", parts[..^1]);
-        }
-
-        if (string.IsNullOrWhiteSpace(targetHost))
+        if (!LanBridge.Common.Protocol.TargetDescriptorParser.TryParse(targetPart, out var descriptor))
         {
             return false;
         }
@@ -324,9 +220,9 @@ public class Program
         mapping = new TunnelMapping
         {
             LocalPort = localPort,
-            TargetHost = targetHost,
-            TargetPort = targetPort,
-            Protocol = protocol
+            TargetHost = descriptor.Host,
+            TargetPort = descriptor.Port,
+            Protocol = descriptor.Protocol
         };
         return true;
     }

@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
+using LanBridge.Common.Configuration;
 using LanBridge.Common.Network;
 using LanBridge.Common.Protocol;
 
@@ -22,6 +23,29 @@ public class ClientConfig
     public bool Verbose { get; set; }
     public bool EnableKcpCongestionControl { get; set; } = false;
     public List<TunnelMapping> Mappings { get; set; } = new();
+
+    public void Validate()
+    {
+        ConfigValidation.EnsureNodeId(NodeId, nameof(NodeId));
+        ConfigValidation.EnsureNodeId(TargetNodeId, nameof(TargetNodeId));
+        ConfigValidation.EnsureHost(SignalingServerHost, nameof(SignalingServerHost));
+        ConfigValidation.EnsureHost(StunServerHost, nameof(StunServerHost));
+        ConfigValidation.EnsurePort(SignalingServerPort, nameof(SignalingServerPort));
+        ConfigValidation.EnsurePort(StunServerPort, nameof(StunServerPort));
+        ConfigValidation.EnsurePort(StunAlternateServerPort, nameof(StunAlternateServerPort));
+        ConfigValidation.EnsurePositive(HolePunchTimeoutMs, nameof(HolePunchTimeoutMs));
+
+        foreach (var mapping in Mappings)
+        {
+            ConfigValidation.EnsurePort(mapping.LocalPort, nameof(TunnelMapping.LocalPort));
+            if (!string.IsNullOrWhiteSpace(mapping.TargetHost))
+            {
+                ConfigValidation.EnsureHost(mapping.TargetHost, nameof(TunnelMapping.TargetHost));
+                ConfigValidation.EnsurePort(mapping.TargetPort, nameof(TunnelMapping.TargetPort));
+                ConfigValidation.EnsureSupportedProtocol(mapping.Protocol, nameof(TunnelMapping.Protocol));
+            }
+        }
+    }
 }
 
 public class TunnelMapping
@@ -33,7 +57,7 @@ public class TunnelMapping
 
     public string Target => string.IsNullOrWhiteSpace(TargetHost) || TargetPort <= 0
         ? string.Empty
-        : $"{TargetHost}:{TargetPort}:{Protocol}";
+        : new TargetDescriptor(TargetHost, TargetPort, Protocol).ToString();
 }
 
 public enum ConnectionState

@@ -253,11 +253,80 @@ dotnet publish src/LanBridge.ExtranetPeer/LanBridge.ExtranetPeer.csproj -c Relea
 
 ---
 
+## ✅ 测试与验证
+
+仓库现在包含两套验证入口：
+
+* `src/LanBridge.Tests`：正式 **xUnit** 单元测试，覆盖协议编解码、STUN 报文、CIDR 解析、配置校验与 P2P 失败说明。
+* `src/LanBridge.KcpTest`：轻量 **smoke / 仿真验证** 程序，可快速验证共享协议层是否可运行。
+
+常用命令：
+
+```bash
+# 运行正式单元测试
+dotnet test src/LanBridge.Tests/LanBridge.Tests.csproj
+
+# 只跑共享网络层 smoke 检查
+dotnet run --project src/LanBridge.KcpTest -- --smoke-only
+
+# 编译全仓库
+dotnet build LanBridge.slnx -c Debug
+```
+
+如果您使用 GitHub Actions，仓库中的 [`.github/workflows/ci.yml`](./.github/workflows/ci.yml) 会自动执行：
+
+* `dotnet restore`
+* `dotnet build`
+* `dotnet test src/LanBridge.Tests`
+* `dotnet run --project src/LanBridge.KcpTest -- --smoke-only`
+
+---
+
 ## 📈 传输模式与性能调优
 
 在打洞测试过程中，LanBridge 终端控制台会醒目显示当前通道模式：
 * 🟢 `TRANSPORT MODE: P2P DIRECT` (低延迟，高带宽，直连免服务器中转)
 * 🟡 `TRANSPORT MODE: RELAY MODE` (服务器中转，安全备用)
+
+---
+
+## 🔐 访问控制与安全
+
+建议生产环境至少启用以下三层保护：
+
+* **内网访问白名单**：使用 `--allow-target` / `--allow-subnet` 仅暴露必要目标。
+* **服务端注册令牌**：为 `LanBridge.SignalingServer` 启用 `--require-token` 与一个或多个 `--registration-token`。
+* **持续验证**：在发版前至少跑一次 `dotnet test` 和 `--smoke-only`。
+
+服务端示例：
+
+```bash
+dotnet run --project src/LanBridge.SignalingServer -- \
+  --require-token \
+  --registration-token lanbridge-prod-token \
+  --metrics-interval 30 \
+  --relay-timeout 30000
+```
+
+对应配置文件示例：
+
+```json
+{
+  "signalingPort": 9000,
+  "stunPort": 9001,
+  "stunAlternatePort": 9003,
+  "relayPort": 9002,
+  "maxRelaySessions": 100,
+  "relayTimeoutMs": 30000,
+  "requireRegistrationToken": true,
+  "registrationTokens": [
+    "lanbridge-prod-token"
+  ],
+  "metricsReportIntervalSeconds": 30
+}
+```
+
+如果开启注册令牌但没有提供任何 `registrationTokens`，服务端现在会在启动时直接拒绝该配置，避免“看起来开了保护、实际上未生效”的误配置。
 
 ### 1. 极致零拷贝/零分配管道调优
 LanBridge 在核心数据通路上实现了全链条零拷贝：

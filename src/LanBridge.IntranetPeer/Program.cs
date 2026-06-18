@@ -1,3 +1,5 @@
+using LanBridge.Common.Runtime;
+
 namespace LanBridge.IntranetPeer;
 
 /// <summary>
@@ -7,29 +9,30 @@ public class Program
 {
     public static async Task Main(string[] args)
     {
-        Console.WriteLine("=== LanBridge Intranet Peer ===");
-        Console.WriteLine();
+        ConsoleStatusWriter.WriteHeader("LanBridge Intranet Peer");
         
         var config = LoadConfig(args) ?? new PeerConfig();
         ParseArguments(args, config);
         EnsureDefaultAllowedTarget(config);
+        config.Validate();
         
-        Console.WriteLine($"Configuration:");
-        Console.WriteLine($"  Node ID: {config.NodeId}");
-        Console.WriteLine($"  Signaling Server: {config.SignalingServerHost}:{config.SignalingServerPort}");
-        Console.WriteLine($"  STUN Server: {config.StunServerHost}:{config.StunServerPort}");
-        Console.WriteLine($"  STUN Alternate Port: {config.StunAlternateServerPort}");
-        Console.WriteLine($"  Target Source: {config.TargetSourceHost}:{config.TargetSourcePort}");
-        Console.WriteLine($"  Allowed Targets: {string.Join(", ", config.AllowedTargets)}");
-        Console.WriteLine($"  Allowed Subnets: {string.Join(", ", config.AllowedSubnets)}");
-        Console.WriteLine($"  Verbose: {(config.Verbose ? "enabled" : "disabled")}");
-        Console.WriteLine();
+        ConsoleStatusWriter.WriteConfiguration(new[]
+        {
+            ("Node ID", config.NodeId),
+            ("Signaling Server", $"{config.SignalingServerHost}:{config.SignalingServerPort}"),
+            ("STUN Server", $"{config.StunServerHost}:{config.StunServerPort}"),
+            ("STUN Alternate Port", config.StunAlternateServerPort.ToString()),
+            ("Target Source", $"{config.TargetSourceHost}:{config.TargetSourcePort}"),
+            ("Allowed Targets", string.Join(", ", config.AllowedTargets)),
+            ("Allowed Subnets", string.Join(", ", config.AllowedSubnets)),
+            ("Verbose", config.Verbose ? "enabled" : "disabled")
+        });
         
         using var peer = new IntranetPeer(config);
         
         peer.OnStatusChanged += status =>
         {
-            WriteStatus(status);
+            ConsoleStatusWriter.WritePeerStatus(status);
         };
         
         using var cts = new CancellationTokenSource();
@@ -58,61 +61,6 @@ public class Program
         Console.WriteLine("Peer stopped.");
     }
 
-    private static void WriteStatus(string status)
-    {
-        if (status.Contains("P2P connection established", StringComparison.OrdinalIgnoreCase))
-        {
-            WriteModeBanner("P2P DIRECT", ConsoleColor.Green);
-            WriteColored($"[{DateTime.Now:HH:mm:ss}] {status}", ConsoleColor.Green);
-            return;
-        }
-
-        if (status.Contains("Relay connection established", StringComparison.OrdinalIgnoreCase))
-        {
-            WriteModeBanner("RELAY MODE", ConsoleColor.Yellow);
-            WriteColored($"[{DateTime.Now:HH:mm:ss}] {status}", ConsoleColor.Yellow);
-            return;
-        }
-
-        if (status.Contains("relay", StringComparison.OrdinalIgnoreCase))
-        {
-            WriteColored($"[{DateTime.Now:HH:mm:ss}] {status}", ConsoleColor.Yellow);
-            return;
-        }
-
-        if (status.Contains("error", StringComparison.OrdinalIgnoreCase) ||
-            status.Contains("failed", StringComparison.OrdinalIgnoreCase) ||
-            status.Contains("timeout", StringComparison.OrdinalIgnoreCase))
-        {
-            WriteColored($"[{DateTime.Now:HH:mm:ss}] {status}", ConsoleColor.Red);
-            return;
-        }
-
-        if (status.Contains("Hole punch", StringComparison.OrdinalIgnoreCase))
-        {
-            WriteColored($"[{DateTime.Now:HH:mm:ss}] {status}", ConsoleColor.Cyan);
-            return;
-        }
-
-        Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] {status}");
-    }
-
-    private static void WriteModeBanner(string mode, ConsoleColor color)
-    {
-        WriteColored("", color);
-        WriteColored("============================================================", color);
-        WriteColored($"  TRANSPORT MODE: {mode}", color);
-        WriteColored("============================================================", color);
-    }
-
-    private static void WriteColored(string message, ConsoleColor color)
-    {
-        var originalColor = Console.ForegroundColor;
-        Console.ForegroundColor = color;
-        Console.WriteLine(message);
-        Console.ForegroundColor = originalColor;
-    }
-    
     private static void ParseArguments(string[] args, PeerConfig config)
     {
         for (int i = 0; i < args.Length; i++)
@@ -221,27 +169,7 @@ public class Program
 
     private static PeerConfig? LoadConfig(string[] args)
     {
-        var configPath = FindOptionValue(args, "--config", "-c");
-        if (string.IsNullOrWhiteSpace(configPath))
-        {
-            return null;
-        }
-
-        var json = File.ReadAllText(configPath);
-        return System.Text.Json.JsonSerializer.Deserialize(json, IntranetConfigJsonContext.Default.PeerConfig);
-    }
-
-    private static string? FindOptionValue(string[] args, string longName, string shortName)
-    {
-        for (var i = 0; i < args.Length - 1; i++)
-        {
-            if (args[i] == longName || args[i] == shortName)
-            {
-                return args[i + 1];
-            }
-        }
-
-        return null;
+        return JsonConfigFile.Load(args, IntranetConfigJsonContext.Default.PeerConfig, "--config", "-c");
     }
 
     private static bool TryParseTarget(string value, out TargetEndpoint target)
