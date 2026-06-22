@@ -1,3 +1,4 @@
+using LanBridge.Common.Configuration;
 using LanBridge.Common.Protocol;
 using LanBridge.Common.Diagnostics;
 using LanBridge.Common.Runtime;
@@ -25,14 +26,14 @@ public class Program
         
         ConsoleStatusWriter.WriteConfiguration(new[]
         {
-            ("Signaling Port", _config.SignalingPort.ToString()),
-            ("STUN Port", _config.StunPort.ToString()),
-            ("STUN Alternate Port", _config.StunAlternatePort.ToString()),
-            ("Relay Port", _config.RelayPort.ToString()),
-            ("Max Relay Sessions", _config.MaxRelaySessions.ToString()),
-            ("Relay Timeout", $"{_config.RelayTimeoutMs}ms"),
-            ("Require Registration Token", _config.RequireRegistrationToken ? "enabled" : "disabled"),
-            ("Metrics Interval", $"{_config.MetricsReportIntervalSeconds}s")
+            ("Signaling Port", _config.Ports.SignalingPort.ToString()),
+            ("STUN Port", _config.Ports.StunPort.ToString()),
+            ("STUN Alternate Port", _config.Ports.StunAlternatePort.ToString()),
+            ("Relay Port", _config.Ports.RelayPort.ToString()),
+            ("Max Relay Sessions", _config.Relay.MaxSessions.ToString()),
+            ("Relay Timeout", $"{_config.Relay.IdleTimeoutMs}ms"),
+            ("Require Registration Token", _config.Security.RequireRegistrationToken ? "enabled" : "disabled"),
+            ("Metrics Interval", $"{_config.Metrics.ReportIntervalSeconds}s")
         });
         
         // 启动服务
@@ -165,7 +166,12 @@ public class Program
 
     private static ServerConfig? LoadConfig(string[] args)
     {
-        return JsonConfigFile.Load(args, ServerConfigJsonContext.Default.ServerConfig, "--config", "-c");
+        return JsonConfigFile.Load(
+            args,
+            ServerConfigJsonContext.Default.ServerConfig,
+            ConfigJsonCompatibility.NormalizeServer,
+            "--config",
+            "-c");
     }
 
     private static async Task ReportMetricsLoopAsync(CancellationToken cancellationToken)

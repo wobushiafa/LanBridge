@@ -1,3 +1,4 @@
+using LanBridge.Common.Configuration;
 using LanBridge.Common.Runtime;
 
 namespace LanBridge.ExtranetPeer;
@@ -18,15 +19,15 @@ public class Program
         
         var configurationItems = new List<(string Label, string Value)>
         {
-            ("Node ID", config.NodeId),
-            ("Signaling Server", $"{config.SignalingServerHost}:{config.SignalingServerPort}"),
-            ("STUN Server", $"{config.StunServerHost}:{config.StunServerPort}"),
-            ("STUN Alternate Port", config.StunAlternateServerPort.ToString()),
-            ("Target Node", config.TargetNodeId),
-            ("Local Proxy Port", config.LocalProxyPort.ToString()),
-            ("Hole Punch Timeout", $"{config.HolePunchTimeoutMs}ms"),
-            ("Relay Fallback", config.EnableRelayFallback ? "enabled" : "disabled"),
-            ("Verbose", config.Verbose ? "enabled" : "disabled")
+            ("Identity", config.Identity.NodeId),
+            ("Signaling", $"{config.Signaling.Host}:{config.Signaling.Port}"),
+            ("STUN", $"{config.Stun.Host}:{config.Stun.Port}"),
+            ("STUN Alternate Port", config.Stun.AlternatePort.ToString()),
+            ("Connection Target", config.Connection.TargetNodeId),
+            ("Proxy Port", config.Proxy.LocalPort.ToString()),
+            ("Hole Punch Timeout", $"{config.Connection.HolePunchTimeoutMs}ms"),
+            ("Relay Fallback", config.Connection.EnableRelayFallback ? "enabled" : "disabled"),
+            ("Verbose", config.Transport.Verbose ? "enabled" : "disabled")
         };
         configurationItems.AddRange(config.Mappings.Select(mapping =>
             ("Mapping", $"127.0.0.1:{mapping.LocalPort} -> {(string.IsNullOrWhiteSpace(mapping.Target) ? "intranet default target" : mapping.Target)}")));
@@ -184,7 +185,12 @@ public class Program
 
     private static ClientConfig? LoadConfig(string[] args)
     {
-        return JsonConfigFile.Load(args, ExtranetConfigJsonContext.Default.ClientConfig, "--config", "-c");
+        return JsonConfigFile.Load(
+            args,
+            ExtranetConfigJsonContext.Default.ClientConfig,
+            ConfigJsonCompatibility.NormalizeExtranet,
+            "--config",
+            "-c");
     }
 
     private static void EnsureDefaultMapping(ClientConfig config)

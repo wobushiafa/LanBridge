@@ -1,3 +1,4 @@
+using LanBridge.Common.Configuration;
 using LanBridge.Common.Runtime;
 
 namespace LanBridge.IntranetPeer;
@@ -18,14 +19,14 @@ public class Program
         
         ConsoleStatusWriter.WriteConfiguration(new[]
         {
-            ("Node ID", config.NodeId),
-            ("Signaling Server", $"{config.SignalingServerHost}:{config.SignalingServerPort}"),
-            ("STUN Server", $"{config.StunServerHost}:{config.StunServerPort}"),
-            ("STUN Alternate Port", config.StunAlternateServerPort.ToString()),
-            ("Target Source", $"{config.TargetSourceHost}:{config.TargetSourcePort}"),
+            ("Identity", config.Identity.NodeId),
+            ("Signaling", $"{config.Signaling.Host}:{config.Signaling.Port}"),
+            ("STUN", $"{config.Stun.Host}:{config.Stun.Port}"),
+            ("STUN Alternate Port", config.Stun.AlternatePort.ToString()),
+            ("Target Source", $"{config.Target.Host}:{config.Target.Port}"),
             ("Allowed Targets", string.Join(", ", config.AllowedTargets)),
             ("Allowed Subnets", string.Join(", ", config.AllowedSubnets)),
-            ("Verbose", config.Verbose ? "enabled" : "disabled")
+            ("Verbose", config.Transport.Verbose ? "enabled" : "disabled")
         });
         
         using var peer = new IntranetPeer(config);
@@ -169,7 +170,12 @@ public class Program
 
     private static PeerConfig? LoadConfig(string[] args)
     {
-        return JsonConfigFile.Load(args, IntranetConfigJsonContext.Default.PeerConfig, "--config", "-c");
+        return JsonConfigFile.Load(
+            args,
+            IntranetConfigJsonContext.Default.PeerConfig,
+            ConfigJsonCompatibility.NormalizeIntranet,
+            "--config",
+            "-c");
     }
 
     private static bool TryParseTarget(string value, out TargetEndpoint target)

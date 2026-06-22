@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
+using System.Text.Json.Serialization;
 using LanBridge.Common.Configuration;
 using LanBridge.Common.Network;
 using LanBridge.Common.Protocol;
@@ -10,31 +11,46 @@ namespace LanBridge.IntranetPeer;
 
 public class PeerConfig
 {
-    public string NodeId { get; set; } = "intranet-peer-001";
-    public string SignalingServerHost { get; set; } = "127.0.0.1";
-    public int SignalingServerPort { get; set; } = 9000;
-    public string StunServerHost { get; set; } = "127.0.0.1";
-    public int StunServerPort { get; set; } = 9001;
-    public int StunAlternateServerPort { get; set; } = 9003;
-    public string Token { get; set; } = "default-token";
-    public int UdpPort { get; set; }
-    public string TargetSourceHost { get; set; } = "127.0.0.1";
-    public int TargetSourcePort { get; set; } = 554;
-    public bool Verbose { get; set; }
-    public bool EnableKcpCongestionControl { get; set; } = false;
+    [JsonIgnore]
+    public NodeIdentityOptions Identity { get; } = new() { NodeId = "intranet-peer-001", Token = "default-token" };
+
+    [JsonIgnore]
+    public EndpointOptions Signaling { get; } = new() { Host = "127.0.0.1", Port = 9000 };
+
+    [JsonIgnore]
+    public StunEndpointOptions Stun { get; } = new();
+
+    [JsonIgnore]
+    public TransportOptions Transport { get; } = new();
+
+    [JsonIgnore]
+    public IntranetTargetOptions Target { get; } = new();
+
+    public string NodeId { get => Identity.NodeId; set => Identity.NodeId = value; }
+    public string SignalingServerHost { get => Signaling.Host; set => Signaling.Host = value; }
+    public int SignalingServerPort { get => Signaling.Port; set => Signaling.Port = value; }
+    public string StunServerHost { get => Stun.Host; set => Stun.Host = value; }
+    public int StunServerPort { get => Stun.Port; set => Stun.Port = value; }
+    public int StunAlternateServerPort { get => Stun.AlternatePort; set => Stun.AlternatePort = value; }
+    public string Token { get => Identity.Token; set => Identity.Token = value; }
+    public int UdpPort { get => Transport.UdpPort; set => Transport.UdpPort = value; }
+    public string TargetSourceHost { get => Target.Host; set => Target.Host = value; }
+    public int TargetSourcePort { get => Target.Port; set => Target.Port = value; }
+    public bool Verbose { get => Transport.Verbose; set => Transport.Verbose = value; }
+    public bool EnableKcpCongestionControl { get => Transport.EnableKcpCongestionControl; set => Transport.EnableKcpCongestionControl = value; }
     public List<TargetEndpoint> AllowedTargets { get; set; } = new();
     public List<AllowedSubnet> AllowedSubnets { get; set; } = new();
 
     public void Validate()
     {
-        ConfigValidation.EnsureNodeId(NodeId, nameof(NodeId));
-        ConfigValidation.EnsureHost(SignalingServerHost, nameof(SignalingServerHost));
-        ConfigValidation.EnsureHost(StunServerHost, nameof(StunServerHost));
-        ConfigValidation.EnsureHost(TargetSourceHost, nameof(TargetSourceHost));
-        ConfigValidation.EnsurePort(SignalingServerPort, nameof(SignalingServerPort));
-        ConfigValidation.EnsurePort(StunServerPort, nameof(StunServerPort));
-        ConfigValidation.EnsurePort(StunAlternateServerPort, nameof(StunAlternateServerPort));
-        ConfigValidation.EnsurePort(TargetSourcePort, nameof(TargetSourcePort));
+        ConfigValidation.EnsureNodeId(Identity.NodeId, nameof(Identity.NodeId));
+        ConfigValidation.EnsureHost(Signaling.Host, nameof(Signaling.Host));
+        ConfigValidation.EnsureHost(Stun.Host, nameof(Stun.Host));
+        ConfigValidation.EnsureHost(Target.Host, nameof(Target.Host));
+        ConfigValidation.EnsurePort(Signaling.Port, nameof(Signaling.Port));
+        ConfigValidation.EnsurePort(Stun.Port, nameof(Stun.Port));
+        ConfigValidation.EnsurePort(Stun.AlternatePort, nameof(Stun.AlternatePort));
+        ConfigValidation.EnsurePort(Target.Port, nameof(Target.Port));
 
         foreach (var target in AllowedTargets)
         {
@@ -142,16 +158,16 @@ public class IntranetPeer : IDisposable
         _connection = new ConnectionNegotiator(new PeerConnectionOptions
         {
             Role = PeerConnectionRole.Intranet,
-            NodeId = _config.NodeId,
-            SignalingServerHost = _config.SignalingServerHost,
-            SignalingServerPort = _config.SignalingServerPort,
-            StunServerHost = _config.StunServerHost,
-            StunServerPort = _config.StunServerPort,
-            StunAlternateServerPort = _config.StunAlternateServerPort,
-            Token = _config.Token,
-            UdpPort = _config.UdpPort,
-            Verbose = _config.Verbose,
-            EnableKcpCongestionControl = _config.EnableKcpCongestionControl
+            NodeId = _config.Identity.NodeId,
+            SignalingServerHost = _config.Signaling.Host,
+            SignalingServerPort = _config.Signaling.Port,
+            StunServerHost = _config.Stun.Host,
+            StunServerPort = _config.Stun.Port,
+            StunAlternateServerPort = _config.Stun.AlternatePort,
+            Token = _config.Identity.Token,
+            UdpPort = _config.Transport.UdpPort,
+            Verbose = _config.Transport.Verbose,
+            EnableKcpCongestionControl = _config.Transport.EnableKcpCongestionControl
         });
         _connection.OnStatusChanged += status => OnStatusChanged?.Invoke(status);
         _connection.OnSessionDataReceived += (sessionId, data, length) => _ = HandleTunnelFrameAsync(sessionId, data, length);
@@ -493,7 +509,7 @@ public class IntranetPeer : IDisposable
         _config.AllowedTargets.Add(new TargetEndpoint
         {
             Host = _config.TargetSourceHost,
-            Port = _config.TargetSourcePort
+            Port = _config.Target.Port
         });
     }
 

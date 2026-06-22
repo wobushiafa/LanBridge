@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
+using System.Text.Json.Serialization;
 using LanBridge.Common.Configuration;
 using LanBridge.Common.Network;
 using LanBridge.Common.Protocol;
@@ -9,31 +10,49 @@ namespace LanBridge.ExtranetPeer;
 
 public class ClientConfig
 {
-    public string NodeId { get; set; } = "extranet-client-001";
-    public string SignalingServerHost { get; set; } = "127.0.0.1";
-    public int SignalingServerPort { get; set; } = 9000;
-    public string StunServerHost { get; set; } = "127.0.0.1";
-    public int StunServerPort { get; set; } = 9001;
-    public int StunAlternateServerPort { get; set; } = 9003;
-    public string TargetNodeId { get; set; } = "intranet-peer-001";
-    public int LocalProxyPort { get; set; } = 8554;
-    public int UdpPort { get; set; }
-    public int HolePunchTimeoutMs { get; set; } = 10000;
-    public bool EnableRelayFallback { get; set; } = true;
-    public bool Verbose { get; set; }
-    public bool EnableKcpCongestionControl { get; set; } = false;
+    [JsonIgnore]
+    public NodeIdentityOptions Identity { get; } = new() { NodeId = "extranet-client-001" };
+
+    [JsonIgnore]
+    public EndpointOptions Signaling { get; } = new() { Host = "127.0.0.1", Port = 9000 };
+
+    [JsonIgnore]
+    public StunEndpointOptions Stun { get; } = new();
+
+    [JsonIgnore]
+    public ExtranetConnectionOptions Connection { get; } = new() { TargetNodeId = "intranet-peer-001" };
+
+    [JsonIgnore]
+    public ProxyListenerOptions Proxy { get; } = new();
+
+    [JsonIgnore]
+    public TransportOptions Transport { get; } = new();
+
+    public string NodeId { get => Identity.NodeId; set => Identity.NodeId = value; }
+    public string SignalingServerHost { get => Signaling.Host; set => Signaling.Host = value; }
+    public int SignalingServerPort { get => Signaling.Port; set => Signaling.Port = value; }
+    public string StunServerHost { get => Stun.Host; set => Stun.Host = value; }
+    public int StunServerPort { get => Stun.Port; set => Stun.Port = value; }
+    public int StunAlternateServerPort { get => Stun.AlternatePort; set => Stun.AlternatePort = value; }
+    public string TargetNodeId { get => Connection.TargetNodeId; set => Connection.TargetNodeId = value; }
+    public int LocalProxyPort { get => Proxy.LocalPort; set => Proxy.LocalPort = value; }
+    public int UdpPort { get => Transport.UdpPort; set => Transport.UdpPort = value; }
+    public int HolePunchTimeoutMs { get => Connection.HolePunchTimeoutMs; set => Connection.HolePunchTimeoutMs = value; }
+    public bool EnableRelayFallback { get => Connection.EnableRelayFallback; set => Connection.EnableRelayFallback = value; }
+    public bool Verbose { get => Transport.Verbose; set => Transport.Verbose = value; }
+    public bool EnableKcpCongestionControl { get => Transport.EnableKcpCongestionControl; set => Transport.EnableKcpCongestionControl = value; }
     public List<TunnelMapping> Mappings { get; set; } = new();
 
     public void Validate()
     {
-        ConfigValidation.EnsureNodeId(NodeId, nameof(NodeId));
-        ConfigValidation.EnsureNodeId(TargetNodeId, nameof(TargetNodeId));
-        ConfigValidation.EnsureHost(SignalingServerHost, nameof(SignalingServerHost));
-        ConfigValidation.EnsureHost(StunServerHost, nameof(StunServerHost));
-        ConfigValidation.EnsurePort(SignalingServerPort, nameof(SignalingServerPort));
-        ConfigValidation.EnsurePort(StunServerPort, nameof(StunServerPort));
-        ConfigValidation.EnsurePort(StunAlternateServerPort, nameof(StunAlternateServerPort));
-        ConfigValidation.EnsurePositive(HolePunchTimeoutMs, nameof(HolePunchTimeoutMs));
+        ConfigValidation.EnsureNodeId(Identity.NodeId, nameof(Identity.NodeId));
+        ConfigValidation.EnsureNodeId(Connection.TargetNodeId, nameof(Connection.TargetNodeId));
+        ConfigValidation.EnsureHost(Signaling.Host, nameof(Signaling.Host));
+        ConfigValidation.EnsureHost(Stun.Host, nameof(Stun.Host));
+        ConfigValidation.EnsurePort(Signaling.Port, nameof(Signaling.Port));
+        ConfigValidation.EnsurePort(Stun.Port, nameof(Stun.Port));
+        ConfigValidation.EnsurePort(Stun.AlternatePort, nameof(Stun.AlternatePort));
+        ConfigValidation.EnsurePositive(Connection.HolePunchTimeoutMs, nameof(Connection.HolePunchTimeoutMs));
 
         foreach (var mapping in Mappings)
         {
@@ -109,18 +128,18 @@ public class ExtranetPeer : IDisposable
         _connection = new ConnectionNegotiator(new PeerConnectionOptions
         {
             Role = PeerConnectionRole.Extranet,
-            NodeId = _config.NodeId,
-            SignalingServerHost = _config.SignalingServerHost,
-            SignalingServerPort = _config.SignalingServerPort,
-            StunServerHost = _config.StunServerHost,
-            StunServerPort = _config.StunServerPort,
-            StunAlternateServerPort = _config.StunAlternateServerPort,
-            TargetNodeId = _config.TargetNodeId,
-            UdpPort = _config.UdpPort,
-            HolePunchTimeoutMs = _config.HolePunchTimeoutMs,
-            EnableRelayFallback = _config.EnableRelayFallback,
-            Verbose = _config.Verbose,
-            EnableKcpCongestionControl = _config.EnableKcpCongestionControl
+            NodeId = _config.Identity.NodeId,
+            SignalingServerHost = _config.Signaling.Host,
+            SignalingServerPort = _config.Signaling.Port,
+            StunServerHost = _config.Stun.Host,
+            StunServerPort = _config.Stun.Port,
+            StunAlternateServerPort = _config.Stun.AlternatePort,
+            TargetNodeId = _config.Connection.TargetNodeId,
+            UdpPort = _config.Transport.UdpPort,
+            HolePunchTimeoutMs = _config.Connection.HolePunchTimeoutMs,
+            EnableRelayFallback = _config.Connection.EnableRelayFallback,
+            Verbose = _config.Transport.Verbose,
+            EnableKcpCongestionControl = _config.Transport.EnableKcpCongestionControl
         });
         _connection.OnStatusChanged += HandleConnectionStatus;
         _connection.OnModeChanged += HandleTransportModeChanged;

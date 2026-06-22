@@ -165,21 +165,78 @@ dotnet run --project src/LanBridge.ExtranetPeer -- \
 
 为了更加规范和优雅地进行管理，推荐在生产环境使用 JSON 配置文件。
 
+从当前版本开始，代码内部已经按“配置分组”组织：
+
+* **ExtranetPeer**：`Identity / Signaling / Stun / Connection / Proxy / Transport`
+* **IntranetPeer**：`Identity / Signaling / Stun / Target / Transport`
+* **SignalingServer**：`Ports / Relay / Security / Metrics`
+
+为了保持兼容性，**当前 JSON 文件格式仍然是扁平字段**，命令行参数也保持不变。也就是说：
+
+* 代码内部已经按组收敛，便于维护和扩展
+* 现有 `nodeId`、`signalingServerHost`、`relayTimeoutMs` 这类字段名仍然可直接使用
+* 后续如果迁移到真正的嵌套 JSON，可以在不破坏现有字段的前提下渐进推进
+
+### 配置分组视角
+
+`ExtranetPeer`
+
+* `Identity`：`nodeId`
+* `Signaling`：`signalingServerHost`、`signalingServerPort`
+* `Stun`：`stunServerHost`、`stunServerPort`、`stunAlternateServerPort`
+* `Connection`：`targetNodeId`、`holePunchTimeoutMs`、`enableRelayFallback`
+* `Proxy`：`localProxyPort`、`mappings`
+* `Transport`：`udpPort`、`verbose`、`enableKcpCongestionControl`
+
+`IntranetPeer`
+
+* `Identity`：`nodeId`、`token`
+* `Signaling`：`signalingServerHost`、`signalingServerPort`
+* `Stun`：`stunServerHost`、`stunServerPort`、`stunAlternateServerPort`
+* `Target`：`targetSourceHost`、`targetSourcePort`
+* `Transport`：`udpPort`、`verbose`、`enableKcpCongestionControl`
+* `Access Control`：`allowedTargets`、`allowedSubnets`
+
+`SignalingServer`
+
+* `Ports`：`signalingPort`、`stunPort`、`stunAlternatePort`、`relayPort`
+* `Relay`：`maxRelaySessions`、`relayTimeoutMs`
+* `Security`：`requireRegistrationToken`、`registrationTokens`
+* `Metrics`：`metricsReportIntervalSeconds`
+
+当前配置文件已经同时支持两种写法：
+
+* 旧版平铺字段，便于兼容现有部署。
+* 新版按分组嵌套的 JSON，便于阅读和维护。
+
+如果同一个字段同时出现在平铺层和分组层，程序会优先采用平铺字段，建议长期只保留一种写法。
+
 ### 内网端配置文件 (`intranet.config.json`)
 
 ```json
 {
-  "nodeId": "intranet-peer-001",
-  "signalingServerHost": "lanbridge.yourdomain.com",
-  "signalingServerPort": 9000,
-  "stunServerHost": "lanbridge.yourdomain.com",
-  "stunServerPort": 9001,
-  "stunAlternateServerPort": 9003,
-  "targetSourceHost": "192.168.7.230",
-  "targetSourcePort": 554,
-  "udpPort": 0,
-  "verbose": false,
-  "enableKcpCongestionControl": false,
+  "identity": {
+    "nodeId": "intranet-peer-001",
+    "token": "replace-with-production-token"
+  },
+  "signaling": {
+    "host": "lanbridge.yourdomain.com",
+    "port": 9000
+  },
+  "stun": {
+    "host": "lanbridge.yourdomain.com",
+    "port": 9001,
+    "alternatePort": 9003
+  },
+  "target": {
+    "host": "192.168.7.230",
+    "port": 554
+  },
+  "transport": {
+    "udpPort": 0,
+    "verbose": false,
+    "enableKcpCongestionControl": false
+  },
   "allowedTargets": [
     {
       "host": "192.168.7.230",
@@ -198,18 +255,31 @@ dotnet run --project src/LanBridge.ExtranetPeer -- \
 
 ```json
 {
-  "nodeId": "extranet-client-001",
-  "signalingServerHost": "lanbridge.yourdomain.com",
-  "signalingServerPort": 9000,
-  "stunServerHost": "lanbridge.yourdomain.com",
-  "stunServerPort": 9001,
-  "stunAlternateServerPort": 9003,
-  "targetNodeId": "intranet-peer-001",
-  "udpPort": 0,
-  "holePunchTimeoutMs": 10000,
-  "enableRelayFallback": true,
-  "verbose": false,
-  "enableKcpCongestionControl": false,
+  "identity": {
+    "nodeId": "extranet-client-001"
+  },
+  "signaling": {
+    "host": "lanbridge.yourdomain.com",
+    "port": 9000
+  },
+  "stun": {
+    "host": "lanbridge.yourdomain.com",
+    "port": 9001,
+    "alternatePort": 9003
+  },
+  "connection": {
+    "targetNodeId": "intranet-peer-001",
+    "holePunchTimeoutMs": 10000,
+    "enableRelayFallback": true
+  },
+  "proxy": {
+    "localPort": 8554
+  },
+  "transport": {
+    "udpPort": 0,
+    "verbose": false,
+    "enableKcpCongestionControl": false
+  },
   "mappings": [
     {
       "localPort": 8554,
@@ -232,6 +302,41 @@ dotnet run --project src/LanBridge.ExtranetPeer -- \
   ]
 }
 ```
+
+### 服务端配置文件 (`server.config.json`)
+
+```json
+{
+  "ports": {
+    "signalingPort": 9000,
+    "stunPort": 9001,
+    "stunAlternatePort": 9003,
+    "relayPort": 9002
+  },
+  "relay": {
+    "maxSessions": 100,
+    "idleTimeoutMs": 30000
+  },
+  "security": {
+    "requireRegistrationToken": true,
+    "registrationTokens": [
+      "lanbridge-prod-token"
+    ]
+  },
+  "metrics": {
+    "reportIntervalSeconds": 30
+  }
+}
+```
+
+### 迁移建议
+
+如果您准备整理现有部署配置，建议按下面的顺序迁移：
+
+1. 现有部署可以继续保留平铺 JSON，不需要立即改文件。
+2. 新建配置文件时，优先使用上面的分组嵌套结构。
+3. 不要在同一份配置里长期混用平铺和嵌套；如果临时混用，平铺字段会覆盖嵌套字段。
+4. 后续新增配置项时，优先放进对应分组，避免继续扩散平铺字段。
 
 ---
 
