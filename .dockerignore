@@ -1,0 +1,14 @@
+.git
+.gitignore
+.claude
+.gitnexus
+AGENTS.md
+CLAUDE.md
+README.md
+
+# 忽略所有项目的编译输出
+**/bin/
+**/obj/
+**/.vs/
+**/.idea/
+**/*.user

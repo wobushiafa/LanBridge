@@ -1,0 +1,134 @@
+name: Build and Publish
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - run: dotnet test src/LanBridge.Tests/LanBridge.Tests.csproj
+
+  build:
+    needs: test
+    if: github.event_name != 'pull_request'
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            runtime: linux-x64
+            ext: ''
+          - os: ubuntu-latest
+            runtime: linux-arm64
+            ext: ''
+          - os: windows-latest
+            runtime: win-x64
+            ext: '.exe'
+          - os: macos-latest
+            runtime: osx-x64
+            ext: ''
+          - os: macos-latest
+            runtime: osx-arm64
+            ext: ''
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Install Native AOT dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang zlib1g-dev
+
+      - name: Publish SignalingServer
+        run: >
+          dotnet publish src/LanBridge.SignalingServer/LanBridge.SignalingServer.csproj
+          -c Release
+          -r ${{ matrix.runtime }}
+          --self-contained
+          -o publish/SignalingServer-${{ matrix.runtime }}
+          && rm -f publish/SignalingServer-${{ matrix.runtime }}/*.dbg
+          && rm -f publish/SignalingServer-${{ matrix.runtime }}/*.pdb
+
+      - name: Publish IntranetPeer
+        run: >
+          dotnet publish src/LanBridge.IntranetPeer/LanBridge.IntranetPeer.csproj
+          -c Release
+          -r ${{ matrix.runtime }}
+          --self-contained
+          -o publish/IntranetPeer-${{ matrix.runtime }}
+          && rm -f publish/IntranetPeer-${{ matrix.runtime }}/*.dbg
+          && rm -f publish/IntranetPeer-${{ matrix.runtime }}/*.pdb
+
+      - name: Publish ExtranetPeer
+        run: >
+          dotnet publish src/LanBridge.ExtranetPeer/LanBridge.ExtranetPeer.csproj
+          -c Release
+          -r ${{ matrix.runtime }}
+          --self-contained
+          -o publish/ExtranetPeer-${{ matrix.runtime }}
+          && rm -f publish/ExtranetPeer-${{ matrix.runtime }}/*.dbg
+          && rm -f publish/ExtranetPeer-${{ matrix.runtime }}/*.pdb
+
+      - name: Upload SignalingServer
+        uses: actions/upload-artifact@v4
+        with:
+          name: LanBridge.SignalingServer-${{ matrix.runtime }}
+          path: publish/SignalingServer-${{ matrix.runtime }}/LanBridge.SignalingServer${{ matrix.ext }}
+
+      - name: Upload IntranetPeer
+        uses: actions/upload-artifact@v4
+        with:
+          name: LanBridge.IntranetPeer-${{ matrix.runtime }}
+          path: publish/IntranetPeer-${{ matrix.runtime }}/LanBridge.IntranetPeer${{ matrix.ext }}
+
+      - name: Upload ExtranetPeer
+        uses: actions/upload-artifact@v4
+        with:
+          name: LanBridge.ExtranetPeer-${{ matrix.runtime }}
+          path: publish/ExtranetPeer-${{ matrix.runtime }}/LanBridge.ExtranetPeer${{ matrix.ext }}
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create archives
+        run: |
+          set -e
+          cd artifacts
+          for dir in LanBridge.*-*; do
+            base="${dir}"
+            if [ -f "${dir}" ]; then continue; fi
+            if [[ "$dir" == *win-* ]]; then
+              zip -j "${base}.zip" "${dir}/"*
+            else
+              tar -czf "${base}.tar.gz" -C "${dir}" .
+            fi
+          done
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/*.tar.gz
+            artifacts/*.zip
+          fail_on_unmatched_files: true
+          generate_release_notes: true
