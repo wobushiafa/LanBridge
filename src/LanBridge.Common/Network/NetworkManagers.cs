@@ -168,12 +168,10 @@ public class UdpHolePuncher : IDisposable
 
     public void StartReceivePump()
     {
-        if (_receivePumpTask != null)
+        if (Interlocked.CompareExchange(ref _receivePumpTask, Task.Run(ReceivePumpAsync), null) != null)
         {
             return;
         }
-
-        _receivePumpTask = Task.Run(ReceivePumpAsync);
     }
 
     private async Task ReceivePumpAsync()
@@ -319,10 +317,11 @@ public class UdpHolePuncher : IDisposable
     /// </summary>
     public async Task SendAsync(byte[] data)
     {
-        if (_remoteEndPoint == null)
+        var ep = _remoteEndPoint;
+        if (ep == null)
             throw new InvalidOperationException("Remote endpoint not set");
-        
-        await _udpClient.SendAsync(data, data.Length, _remoteEndPoint);
+
+        await _udpClient.SendAsync(data, data.Length, ep);
     }
     
     /// <summary>
@@ -362,9 +361,9 @@ public class SignalingClient : IDisposable
     private readonly int _serverPort;
     private CancellationTokenSource _cts;
     private readonly SemaphoreSlim _sendLock = new(1, 1);
-    private bool _isConnected;
+    private volatile bool _isConnected;
     
-    public event Action<string>? OnMessageReceived;
+    public event Func<string, Task>? OnMessageReceived;
     public event Action? OnDisconnected;
     public event Action<string>? OnError;
     
@@ -460,7 +459,11 @@ public class SignalingClient : IDisposable
                 }
                 
                 var message = Encoding.UTF8.GetString(buffer, 0, messageLength);
-                OnMessageReceived?.Invoke(message);
+                var handler = OnMessageReceived;
+                if (handler != null)
+                {
+                    await handler.Invoke(message);
+                }
             }
         }
         catch (Exception ex)
@@ -491,8 +494,8 @@ public class SignalingClient : IDisposable
 public class SignalingServer : IDisposable
 {
     private readonly TcpListener _listener;
-    private readonly Dictionary<string, TcpClient> _clients = new();
-    private readonly Dictionary<string, NetworkStream> _streams = new();
+    private readonly ConcurrentDictionary<string, TcpClient> _clients = new();
+    private readonly ConcurrentDictionary<string, NetworkStream> _streams = new();
     private CancellationTokenSource _cts;
     private bool _isRunning;
     
@@ -595,8 +598,8 @@ public class SignalingServer : IDisposable
         }
         finally
         {
-            _clients.Remove(clientId);
-            _streams.Remove(clientId);
+            _clients.TryRemove(clientId, out _);
+            _streams.TryRemove(clientId, out _);
             client.Dispose();
             OnClientDisconnected?.Invoke(clientId);
         }
@@ -626,8 +629,8 @@ public class SignalingServer : IDisposable
         if (_clients.TryGetValue(clientId, out var client))
         {
             client.Dispose();
-            _clients.Remove(clientId);
-            _streams.Remove(clientId);
+            _clients.TryRemove(clientId, out _);
+            _streams.TryRemove(clientId, out _);
         }
     }
     
@@ -678,7 +681,7 @@ public class KcpSession : IDisposable
     private IPEndPoint? _remoteEndPoint;
     private readonly CancellationTokenSource _cts;
     private readonly bool _ownReceiveLoop;
-    private bool _isRunning;
+    private volatile bool _isRunning;
     private long _queuedMessages;
     private long _sentPackets;
     private long _sentBytes;
@@ -837,10 +840,13 @@ public class KcpSession : IDisposable
             {
                 break;
             }
-            catch { }
+            catch (Exception ex)
+            {
+                OnTrace?.Invoke($"KCP update loop error: {ex.Message}");
+            }
         }
     }
-    
+
     /// <summary>
     /// 接收循环
     /// </summary>
@@ -857,7 +863,10 @@ public class KcpSession : IDisposable
             {
                 break;
             }
-            catch { }
+            catch (Exception ex)
+            {
+                OnTrace?.Invoke($"KCP receive loop error: {ex.Message}");
+            }
         }
     }
 
@@ -920,7 +929,7 @@ public class RelayClient : IDisposable
     private NetworkStream? _stream;
     private readonly CancellationTokenSource _cts;
     private readonly SemaphoreSlim _sendLock = new(1, 1);
-    private bool _isConnected;
+    private volatile bool _isConnected;
     
     public event Action<byte[], int>? OnDataReceived;
     public event Action? OnDisconnected;

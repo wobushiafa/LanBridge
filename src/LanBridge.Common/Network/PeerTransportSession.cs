@@ -13,26 +13,41 @@ public enum PeerTransportMode
 public sealed class PeerTransportSession : IDisposable
 {
     private readonly bool _verbose;
+    private readonly object _lock = new();
     private KcpSession? _kcpSession;
     private RelayClient? _relayClient;
     private CancellationTokenSource? _monitorCts;
     private DateTime _lastP2pActivityUtc = DateTime.UtcNow;
     private DateTime _lastMetricsUtc = DateTime.UtcNow;
     private long _lastRttMs = -1;
+    private PeerTransportMode _mode;
 
     public event Action<byte[], int>? OnDataReceived;
     public event Action? OnDisconnected;
     public event Action<string>? OnP2pUnhealthy;
     public event Action<string>? OnStatusChanged;
 
-    public PeerTransportMode Mode { get; private set; } = PeerTransportMode.None;
-
-    public bool IsConnected => Mode switch
+    public PeerTransportMode Mode
     {
-        PeerTransportMode.P2pDirect => _kcpSession?.IsConnected == true,
-        PeerTransportMode.Relay => _relayClient?.IsConnected == true,
-        _ => false
-    };
+        get { lock (_lock) { return _mode; } }
+        private set { lock (_lock) { _mode = value; } }
+    }
+
+    public bool IsConnected
+    {
+        get
+        {
+            lock (_lock)
+            {
+                return _mode switch
+                {
+                    PeerTransportMode.P2pDirect => _kcpSession?.IsConnected == true,
+                    PeerTransportMode.Relay => _relayClient?.IsConnected == true,
+                    _ => false
+                };
+            }
+        }
+    }
 
     public PeerTransportSession(bool verbose)
     {
@@ -43,19 +58,22 @@ public sealed class PeerTransportSession : IDisposable
     {
         DisposeCurrent();
 
-        _kcpSession = session;
-        _lastP2pActivityUtc = DateTime.UtcNow;
-        _lastMetricsUtc = DateTime.UtcNow;
-        _lastRttMs = -1;
-        _kcpSession.OnDataReceived += HandleP2pData;
-        _kcpSession.OnDisconnected += HandleDisconnected;
-        if (_verbose)
+        lock (_lock)
         {
-            _kcpSession.OnTrace += message => OnStatusChanged?.Invoke(message);
-        }
+            _kcpSession = session;
+            _lastP2pActivityUtc = DateTime.UtcNow;
+            _lastMetricsUtc = DateTime.UtcNow;
+            _lastRttMs = -1;
+            _kcpSession.OnDataReceived += HandleP2pData;
+            _kcpSession.OnDisconnected += HandleDisconnected;
+            if (_verbose)
+            {
+                _kcpSession.OnTrace += message => OnStatusChanged?.Invoke(message);
+            }
 
-        Mode = PeerTransportMode.P2pDirect;
-        _kcpSession.Start();
+            _mode = PeerTransportMode.P2pDirect;
+            _kcpSession.Start();
+        }
         StartP2pMonitor();
         OnStatusChanged?.Invoke("P2P connection established");
     }
@@ -64,37 +82,56 @@ public sealed class PeerTransportSession : IDisposable
     {
         DisposeCurrent();
 
-        _relayClient = client;
-        _relayClient.OnDataReceived += (data, length) => OnDataReceived?.Invoke(data, length);
-        _relayClient.OnDisconnected += HandleDisconnected;
+        lock (_lock)
+        {
+            _relayClient = client;
+            _relayClient.OnDataReceived += (data, length) => OnDataReceived?.Invoke(data, length);
+            _relayClient.OnDisconnected += HandleDisconnected;
 
-        Mode = PeerTransportMode.Relay;
+            _mode = PeerTransportMode.Relay;
+        }
         OnStatusChanged?.Invoke("Relay connection established");
     }
 
     public async Task SendAsync(byte[] data, int offset, int length)
     {
-        if (_kcpSession != null && Mode == PeerTransportMode.P2pDirect && _kcpSession.IsConnected)
+        KcpSession? kcp;
+        RelayClient? relay;
+        PeerTransportMode currentMode;
+        lock (_lock)
         {
-            _kcpSession.Send(data, offset, length);
+            kcp = _kcpSession;
+            relay = _relayClient;
+            currentMode = _mode;
+        }
+
+        if (kcp != null && currentMode == PeerTransportMode.P2pDirect && kcp.IsConnected)
+        {
+            kcp.Send(data, offset, length);
             return;
         }
 
-        if (_relayClient != null && Mode == PeerTransportMode.Relay && _relayClient.IsConnected)
+        if (relay != null && currentMode == PeerTransportMode.Relay && relay.IsConnected)
         {
-            await _relayClient.SendAsync(data, offset, length);
+            await relay.SendAsync(data, offset, length);
         }
     }
 
     private void HandleDisconnected()
     {
-        Mode = PeerTransportMode.None;
+        lock (_lock)
+        {
+            _mode = PeerTransportMode.None;
+        }
         OnDisconnected?.Invoke();
     }
 
     private void HandleP2pData(byte[] data, int length)
     {
-        _lastP2pActivityUtc = DateTime.UtcNow;
+        lock (_lock)
+        {
+            _lastP2pActivityUtc = DateTime.UtcNow;
+        }
 
         if (TunnelFrame.TryDecode(data, length, out var frame) && frame.StreamId == 0)
         {
@@ -110,7 +147,10 @@ public sealed class PeerTransportSession : IDisposable
                 if (frame.Payload.Length == 8)
                 {
                     var sentTicks = BinaryPrimitives.ReadInt64LittleEndian(frame.Payload.Span);
-                    _lastRttMs = Math.Max(0, (long)(DateTime.UtcNow - new DateTime(sentTicks, DateTimeKind.Utc)).TotalMilliseconds);
+                    lock (_lock)
+                    {
+                        _lastRttMs = Math.Max(0, (long)(DateTime.UtcNow - new DateTime(sentTicks, DateTimeKind.Utc)).TotalMilliseconds);
+                    }
                 }
                 return;
             }
@@ -121,29 +161,44 @@ public sealed class PeerTransportSession : IDisposable
 
     private void StartP2pMonitor()
     {
-        _monitorCts?.Cancel();
-        _monitorCts?.Dispose();
-        _monitorCts = new CancellationTokenSource();
+        lock (_lock)
+        {
+            _monitorCts?.Cancel();
+            _monitorCts?.Dispose();
+            _monitorCts = new CancellationTokenSource();
+        }
         var token = _monitorCts.Token;
 
         _ = Task.Run(async () =>
         {
-            while (!token.IsCancellationRequested && Mode == PeerTransportMode.P2pDirect)
+            while (!token.IsCancellationRequested)
             {
+                PeerTransportMode currentMode;
+                lock (_lock)
+                {
+                    currentMode = _mode;
+                }
+                if (currentMode != PeerTransportMode.P2pDirect) break;
+
                 try
                 {
                     await Task.Delay(TimeSpan.FromSeconds(5), token);
-                    if (token.IsCancellationRequested || Mode != PeerTransportMode.P2pDirect)
+                    lock (_lock)
                     {
-                        break;
+                        if (currentMode != PeerTransportMode.P2pDirect) break;
                     }
 
                     await SendHeartbeatAsync();
                     MaybeReportStats();
 
-                    if (DateTime.UtcNow - _lastP2pActivityUtc > TimeSpan.FromSeconds(25))
+                    DateTime lastActivity;
+                    lock (_lock)
                     {
-                        var reason = $"P2P idle timeout: no KCP data or heartbeat pong for {(DateTime.UtcNow - _lastP2pActivityUtc).TotalSeconds:F0}s";
+                        lastActivity = _lastP2pActivityUtc;
+                    }
+                    if (DateTime.UtcNow - lastActivity > TimeSpan.FromSeconds(25))
+                    {
+                        var reason = $"P2P idle timeout: no KCP data or heartbeat pong for {(DateTime.UtcNow - lastActivity).TotalSeconds:F0}s";
                         OnStatusChanged?.Invoke(reason);
                         OnP2pUnhealthy?.Invoke(reason);
                         break;
@@ -171,28 +226,45 @@ public sealed class PeerTransportSession : IDisposable
 
     private void MaybeReportStats()
     {
-        if (!_verbose || _kcpSession == null || DateTime.UtcNow - _lastMetricsUtc < TimeSpan.FromSeconds(10))
+        KcpSession? kcp;
+        long rttMs;
+        lock (_lock)
         {
-            return;
+            if (!_verbose || _kcpSession == null || DateTime.UtcNow - _lastMetricsUtc < TimeSpan.FromSeconds(10))
+            {
+                return;
+            }
+            _lastMetricsUtc = DateTime.UtcNow;
+            kcp = _kcpSession;
+            rttMs = _lastRttMs;
         }
 
-        _lastMetricsUtc = DateTime.UtcNow;
-        var stats = _kcpSession.GetStats();
+        var stats = kcp.GetStats();
         var lossHint = stats.InputErrors > 0 ? $", inputErrors={stats.InputErrors}" : "";
-        var rtt = _lastRttMs >= 0 ? $"{_lastRttMs}ms" : "n/a";
+        var rtt = rttMs >= 0 ? $"{rttMs}ms" : "n/a";
         OnStatusChanged?.Invoke($"KCP stats: rtt={rtt}, mtu={stats.Mtu}, cwnd={stats.Cwnd}, waitSnd={stats.WaitSnd}, sent={stats.SentBytes / 1024.0:F1}KB, recv={stats.ReceivedBytes / 1024.0:F1}KB{lossHint}");
     }
 
     private void DisposeCurrent()
     {
-        _kcpSession?.Dispose();
-        _relayClient?.Dispose();
-        _monitorCts?.Cancel();
-        _monitorCts?.Dispose();
-        _monitorCts = null;
-        _kcpSession = null;
-        _relayClient = null;
-        Mode = PeerTransportMode.None;
+        KcpSession? kcp;
+        RelayClient? relay;
+        CancellationTokenSource? monitor;
+        lock (_lock)
+        {
+            kcp = _kcpSession;
+            relay = _relayClient;
+            monitor = _monitorCts;
+            _kcpSession = null;
+            _relayClient = null;
+            _monitorCts = null;
+            _mode = PeerTransportMode.None;
+        }
+
+        monitor?.Cancel();
+        monitor?.Dispose();
+        kcp?.Dispose();
+        relay?.Dispose();
     }
 
     public void Dispose()

@@ -44,11 +44,11 @@ public sealed class ConnectionNegotiator : IDisposable
     private IPEndPoint? _publicEndPointV6;
     private NatDetectionResult? _natDetection;
     private CancellationTokenSource? _relayProbeCts;
-    private bool _isHolePunching;
-    private string _activeSessionId = "default";
-    private DateTime _lastConnectionRequestUtc = DateTime.MinValue;
+    private int _isHolePunching;
+    private volatile string _activeSessionId = "default";
+    private long _lastConnectionRequestTicks = DateTime.MinValue.Ticks;
     private readonly CancellationTokenSource _cts = new();
-    private bool _isNatKeepAliveRunning;
+    private int _isNatKeepAliveRunning;
 
     public event Action<string>? OnStatusChanged;
     public event Action<byte[], int>? OnDataReceived;
@@ -57,8 +57,8 @@ public sealed class ConnectionNegotiator : IDisposable
     public event Action? OnSignalingDisconnected;
 
     public IPEndPoint? PublicEndPoint => _publicEndPoint;
-    public PeerTransportMode Mode => GetSession(_activeSessionId).Mode;
-    public bool IsConnected => GetSession(_activeSessionId).IsConnected;
+    public PeerTransportMode Mode => _sessions.TryGetValue(_activeSessionId, out var session) ? session.Mode : PeerTransportMode.None;
+    public bool IsConnected => _sessions.TryGetValue(_activeSessionId, out var session) && session.IsConnected;
     public bool IsSignalingConnected => _signalingClient?.IsConnected == true;
 
     public ConnectionNegotiator(PeerConnectionOptions options)
@@ -143,11 +143,10 @@ public sealed class ConnectionNegotiator : IDisposable
             return;
         }
 
-        if (_isNatKeepAliveRunning)
+        if (Interlocked.CompareExchange(ref _isNatKeepAliveRunning, 1, 0) != 0)
         {
             return;
         }
-        _isNatKeepAliveRunning = true;
 
         _ = Task.Run(async () =>
         {
@@ -166,7 +165,7 @@ public sealed class ConnectionNegotiator : IDisposable
                         continue;
                     }
 
-                    if (IsConnected || _isHolePunching)
+                    if (IsConnected || Interlocked.CompareExchange(ref _isHolePunching, 0, 0) != 0)
                     {
                         continue;
                     }
@@ -197,7 +196,7 @@ public sealed class ConnectionNegotiator : IDisposable
             }
             finally
             {
-                _isNatKeepAliveRunning = false;
+                Interlocked.Exchange(ref _isNatKeepAliveRunning, 0);
             }
         }, _cts.Token);
     }
@@ -310,7 +309,7 @@ public sealed class ConnectionNegotiator : IDisposable
         await _connectionRequestLock.WaitAsync();
         try
         {
-            if (!force && DateTime.UtcNow - _lastConnectionRequestUtc <= TimeSpan.FromSeconds(2))
+            if (!force && (DateTime.UtcNow.Ticks - Interlocked.Read(ref _lastConnectionRequestTicks)) <= TimeSpan.FromSeconds(2).Ticks)
             {
                 return;
             }
@@ -324,7 +323,7 @@ public sealed class ConnectionNegotiator : IDisposable
             };
 
             await _signalingClient.SendAsync(MessageSerializer.SerializeToString(request));
-            _lastConnectionRequestUtc = DateTime.UtcNow;
+            Interlocked.Exchange(ref _lastConnectionRequestTicks, DateTime.UtcNow.Ticks);
             OnStatusChanged?.Invoke($"Connection requested to {_options.TargetNodeId}");
         }
         finally
@@ -477,7 +476,7 @@ public sealed class ConnectionNegotiator : IDisposable
             {
                 OnStatusChanged?.Invoke("Connecting to signaling server...");
                 _signalingClient = new SignalingClient(_options.SignalingServerHost, _options.SignalingServerPort);
-                _signalingClient.OnMessageReceived += HandleSignalingMessage;
+                _signalingClient.OnMessageReceived += HandleSignalingMessageAsync;
                 _signalingClient.OnDisconnected += () =>
                 {
                     OnSignalingDisconnected?.Invoke();
@@ -528,6 +527,9 @@ public sealed class ConnectionNegotiator : IDisposable
 
     private async Task RegisterNodeAsync()
     {
+        var signalingClient = _signalingClient;
+        if (signalingClient == null) return;
+
         var register = new RegisterMessage
         {
             NodeId = _options.NodeId,
@@ -537,39 +539,46 @@ public sealed class ConnectionNegotiator : IDisposable
             NatType = _natDetection?.NatType ?? StunNatType.Unknown
         };
 
-        await _signalingClient!.SendAsync(MessageSerializer.SerializeToString(register));
+        await signalingClient.SendAsync(MessageSerializer.SerializeToString(register));
     }
 
-    private async void HandleSignalingMessage(string message)
+    private async Task HandleSignalingMessageAsync(string message)
     {
-        var baseMessage = MessageSerializer.Deserialize(message);
-        if (baseMessage == null)
+        try
         {
-            return;
+            var baseMessage = MessageSerializer.Deserialize(message);
+            if (baseMessage == null)
+            {
+                return;
+            }
+
+            switch (baseMessage.Type)
+            {
+                case MessageType.RegisterAck:
+                    var ack = (RegisterAck)baseMessage;
+                    OnStatusChanged?.Invoke($"Registration {(ack.Success ? "success" : "failed")}: {ack.Message}");
+                    break;
+
+                case MessageType.ConnectReady:
+                    await HandleConnectReadyAsync((ConnectReady)baseMessage);
+                    break;
+
+                case MessageType.HolePunchStart:
+                    await HandleHolePunchStartAsync((HolePunchStart)baseMessage);
+                    break;
+
+                case MessageType.RelayAccept:
+                    await HandleRelayAcceptAsync((RelayAccept)baseMessage);
+                    break;
+
+                case MessageType.Error:
+                    await HandleErrorAsync((ErrorMessage)baseMessage);
+                    break;
+            }
         }
-
-        switch (baseMessage.Type)
+        catch (Exception ex)
         {
-            case MessageType.RegisterAck:
-                var ack = (RegisterAck)baseMessage;
-                OnStatusChanged?.Invoke($"Registration {(ack.Success ? "success" : "failed")}: {ack.Message}");
-                break;
-
-            case MessageType.ConnectReady:
-                await HandleConnectReadyAsync((ConnectReady)baseMessage);
-                break;
-
-            case MessageType.HolePunchStart:
-                await HandleHolePunchStartAsync((HolePunchStart)baseMessage);
-                break;
-
-            case MessageType.RelayAccept:
-                await HandleRelayAcceptAsync((RelayAccept)baseMessage);
-                break;
-
-            case MessageType.Error:
-                await HandleErrorAsync((ErrorMessage)baseMessage);
-                break;
+            OnStatusChanged?.Invoke($"Signaling message error: {ex.Message}");
         }
     }
 
@@ -656,7 +665,7 @@ public sealed class ConnectionNegotiator : IDisposable
             return;
         }
 
-        _isHolePunching = true;
+        Interlocked.Exchange(ref _isHolePunching, 1);
         
         if (targetEndPoint != null)
         {
@@ -675,7 +684,7 @@ public sealed class ConnectionNegotiator : IDisposable
             _ = Task.Run(async () =>
             {
                 await Task.Delay(_options.HolePunchTimeoutMs + 1000);
-                if (_isHolePunching && !IsConnected)
+                if (Interlocked.CompareExchange(ref _isHolePunching, 0, 0) != 0 && !IsConnected)
                 {
                     OnStatusChanged?.Invoke("Hole punch timeout. Falling back to relay...");
                     OnStatusChanged?.Invoke($"P2P failure reason: {ExplainP2pFailure()}");
@@ -709,7 +718,7 @@ public sealed class ConnectionNegotiator : IDisposable
         _holePuncher!.OnHolePunched += endpoint =>
         {
             OnStatusChanged?.Invoke($"Hole punched to {endpoint}");
-            _isHolePunching = false;
+            Interlocked.Exchange(ref _isHolePunching, 0);
 
             if (!_pendingPunches.TryRemove(GetAddressKey(endpoint.Address), out var pending))
             {
@@ -735,7 +744,7 @@ public sealed class ConnectionNegotiator : IDisposable
             if (IsConnected) return;
 
             OnStatusChanged?.Invoke($"[LAN Discovery] Discovered local peer at {endpoint}, conv={conv}. Direct-connecting...");
-            _isHolePunching = false;
+            Interlocked.Exchange(ref _isHolePunching, 0);
 
             var sessionId = _activeSessionId;
             _pendingPunches[GetAddressKey(endpoint.Address)] = new PendingPunch(sessionId, conv);
@@ -798,7 +807,7 @@ public sealed class ConnectionNegotiator : IDisposable
         var sessionData = Encoding.UTF8.GetBytes($"{message.SessionId}|{message.Role}");
         await relayClient.SendAsync(sessionData, 0, sessionData.Length);
 
-        _isHolePunching = false;
+        Interlocked.Exchange(ref _isHolePunching, 0);
         GetSession(sessionId).UseRelay(relayClient);
         OnModeChanged?.Invoke(PeerTransportMode.Relay);
         StartRelayProbeLoop();

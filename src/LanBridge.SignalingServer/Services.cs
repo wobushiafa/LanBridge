@@ -3,22 +3,27 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
+using LanBridge.Common.Configuration;
 using LanBridge.Common.Protocol;
 using LanBridge.Common.Network;
 
 namespace LanBridge.SignalingServer;
 
-/// <summary>
-/// 信令服务器配置
-/// </summary>
-public class ServerConfig
+internal static class TcpListenerFactory
 {
-    public int SignalingPort { get; set; } = 9000;
-    public int StunPort { get; set; } = 9001;
-    public int StunAlternatePort { get; set; } = 9003;
-    public int RelayPort { get; set; } = 9002;
-    public int MaxRelaySessions { get; set; } = 100;
-    public int RelayTimeoutMs { get; set; } = 30000;
+    public static TcpListener CreateDualStackTcpListener(int port)
+    {
+        try
+        {
+            var listener = new TcpListener(IPAddress.IPv6Any, port);
+            listener.Server.DualMode = true;
+            return listener;
+        }
+        catch
+        {
+            return new TcpListener(IPAddress.Any, port);
+        }
+    }
 }
 
 /// <summary>
@@ -181,10 +186,10 @@ public class SignalingService : IDisposable
     {
         _port = port;
         _relayPort = relayPort;
-        _listener = new TcpListener(IPAddress.Any, port);
+        _listener = TcpListenerFactory.CreateDualStackTcpListener(port);
         _cts = new CancellationTokenSource();
     }
-    
+
     public async Task StartAsync()
     {
         _listener.Start();
@@ -523,10 +528,10 @@ public class RelayService : IDisposable
     {
         _port = port;
         _maxSessions = maxSessions;
-        _listener = new TcpListener(IPAddress.Any, port);
+        _listener = TcpListenerFactory.CreateDualStackTcpListener(port);
         _cts = new CancellationTokenSource();
     }
-    
+
     public async Task StartAsync()
     {
         _listener.Start();
