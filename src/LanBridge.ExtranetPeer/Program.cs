@@ -1,3 +1,5 @@
+using LanBridge.Common.Configuration;
+
 namespace LanBridge.ExtranetPeer;
 
 /// <summary>
@@ -5,15 +7,25 @@ namespace LanBridge.ExtranetPeer;
 /// </summary>
 public class Program
 {
+    private static readonly ConsoleStatusWriter s_statusWriter = new();
+
     public static async Task Main(string[] args)
     {
         Console.WriteLine("=== LanBridge Extranet Client ===");
         Console.WriteLine();
-        
-        var config = LoadConfig(args) ?? new ClientConfig();
+
+        var config = ConfigLoader.LoadConfig(args, ConfigJsonContext.Default.ClientConfig) ?? new ClientConfig();
         ParseArguments(args, config);
         EnsureDefaultMapping(config);
-        
+
+        var errors = config.Validate();
+        if (errors.Count > 0)
+        {
+            foreach (var e in errors)
+                Console.WriteLine($"Config error: {e}");
+            return;
+        }
+
         Console.WriteLine($"Configuration:");
         Console.WriteLine($"  Node ID: {config.NodeId}");
         Console.WriteLine($"  Signaling Server: {config.SignalingServerHost}:{config.SignalingServerPort}");
@@ -29,12 +41,12 @@ public class Program
         Console.WriteLine($"  Relay Fallback: {(config.EnableRelayFallback ? "enabled" : "disabled")}");
         Console.WriteLine($"  Verbose: {(config.Verbose ? "enabled" : "disabled")}");
         Console.WriteLine();
-        
+
         using var peer = new ExtranetPeer(config);
-        
+
         peer.OnStatusChanged += status =>
         {
-            WriteStatus(status);
+            s_statusWriter.WriteStatus(status);
         };
 
         var trafficLock = new object();
@@ -53,14 +65,14 @@ public class Program
 
                 var mode = peer.State == ConnectionState.RelayMode ? "RELAY" :
                     peer.State == ConnectionState.Connected ? "P2P" : peer.State.ToString();
-                WriteColored($"[{DateTime.Now:HH:mm:ss}] Traffic: {remoteBytes / 1024.0:F1} KB from remote via {mode}", ConsoleColor.DarkGray);
+                s_statusWriter.WriteColored($"[{DateTime.Now:HH:mm:ss}] Traffic: {remoteBytes / 1024.0:F1} KB from remote via {mode}", ConsoleColor.DarkGray);
                 remoteBytes = 0;
                 lastTrafficLog = DateTime.UtcNow;
             }
         };
-        
+
         using var cts = new CancellationTokenSource();
-        
+
         Console.CancelKeyPress += (s, e) =>
         {
             e.Cancel = true;
@@ -68,7 +80,7 @@ public class Program
             peer.Dispose();
             cts.Cancel();
         };
-        
+
         try
         {
             await peer.StartAsync();
@@ -81,66 +93,10 @@ public class Program
         {
             Console.WriteLine($"Fatal error: {ex.Message}");
         }
-        
+
         Console.WriteLine("Client stopped.");
     }
 
-    private static void WriteStatus(string status)
-    {
-        if (status.Contains("P2P connection established", StringComparison.OrdinalIgnoreCase))
-        {
-            WriteModeBanner("P2P DIRECT", ConsoleColor.Green);
-            WriteColored($"[{DateTime.Now:HH:mm:ss}] {status}", ConsoleColor.Green);
-            return;
-        }
-
-        if (status.Contains("Relay connection established", StringComparison.OrdinalIgnoreCase))
-        {
-            WriteModeBanner("RELAY MODE", ConsoleColor.Yellow);
-            WriteColored($"[{DateTime.Now:HH:mm:ss}] {status}", ConsoleColor.Yellow);
-            return;
-        }
-
-        if (status.Contains("relay", StringComparison.OrdinalIgnoreCase))
-        {
-            WriteColored($"[{DateTime.Now:HH:mm:ss}] {status}", ConsoleColor.Yellow);
-            return;
-        }
-
-        if (status.Contains("error", StringComparison.OrdinalIgnoreCase) ||
-            status.Contains("failed", StringComparison.OrdinalIgnoreCase) ||
-            status.Contains("timeout", StringComparison.OrdinalIgnoreCase))
-        {
-            WriteColored($"[{DateTime.Now:HH:mm:ss}] {status}", ConsoleColor.Red);
-            return;
-        }
-
-        if (status.StartsWith("State:", StringComparison.OrdinalIgnoreCase) ||
-            status.Contains("Hole punch", StringComparison.OrdinalIgnoreCase))
-        {
-            WriteColored($"[{DateTime.Now:HH:mm:ss}] {status}", ConsoleColor.Cyan);
-            return;
-        }
-
-        Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] {status}");
-    }
-
-    private static void WriteModeBanner(string mode, ConsoleColor color)
-    {
-        WriteColored("", color);
-        WriteColored("============================================================", color);
-        WriteColored($"  TRANSPORT MODE: {mode}", color);
-        WriteColored("============================================================", color);
-    }
-
-    private static void WriteColored(string message, ConsoleColor color)
-    {
-        var originalColor = Console.ForegroundColor;
-        Console.ForegroundColor = color;
-        Console.WriteLine(message);
-        Console.ForegroundColor = originalColor;
-    }
-    
     private static void ParseArguments(string[] args, ClientConfig config)
     {
         for (int i = 0; i < args.Length; i++)
@@ -158,25 +114,25 @@ public class Program
                     if (i + 1 < args.Length)
                         config.NodeId = args[++i];
                     break;
-                
+
                 case "--signaling-host":
                 case "-sh":
                     if (i + 1 < args.Length)
                         config.SignalingServerHost = args[++i];
                     break;
-                
+
                 case "--signaling-port":
                 case "-sp":
                     if (i + 1 < args.Length && int.TryParse(args[++i], out int sp))
                         config.SignalingServerPort = sp;
                     break;
-                
+
                 case "--stun-host":
                 case "-sth":
                     if (i + 1 < args.Length)
                         config.StunServerHost = args[++i];
                     break;
-                
+
                 case "--stun-port":
                 case "-stp":
                     if (i + 1 < args.Length && int.TryParse(args[++i], out int stp))
@@ -187,13 +143,13 @@ public class Program
                     if (i + 1 < args.Length && int.TryParse(args[++i], out int sap))
                         config.StunAlternateServerPort = sap;
                     break;
-                
+
                 case "--target-node":
                 case "-tn":
                     if (i + 1 < args.Length)
                         config.TargetNodeId = args[++i];
                     break;
-                
+
                 case "--local-port":
                 case "-lp":
                     if (i + 1 < args.Length && int.TryParse(args[++i], out int lp))
@@ -202,22 +158,22 @@ public class Program
 
                 case "--map":
                 case "-m":
-                    if (i + 1 < args.Length && TryParseMapping(args[++i], out var mapping))
+                    if (i + 1 < args.Length && EndpointParser.TryParseTunnelMapping(args[++i], out var mapping))
                         config.Mappings.Add(mapping);
                     break;
-                
+
                 case "--udp-port":
                 case "-up":
                     if (i + 1 < args.Length && int.TryParse(args[++i], out int up))
                         config.UdpPort = up;
                     break;
-                
+
                 case "--punch-timeout":
                 case "-pt":
                     if (i + 1 < args.Length && int.TryParse(args[++i], out int pt))
                         config.HolePunchTimeoutMs = pt;
                     break;
-                
+
                 case "--no-relay":
                     config.EnableRelayFallback = false;
                     break;
@@ -226,7 +182,7 @@ public class Program
                 case "-v":
                     config.Verbose = true;
                     break;
-                
+
                 case "--help":
                 case "-h":
                     PrintHelp();
@@ -234,31 +190,6 @@ public class Program
                     break;
             }
         }
-    }
-
-    private static ClientConfig? LoadConfig(string[] args)
-    {
-        var configPath = FindOptionValue(args, "--config", "-c");
-        if (string.IsNullOrWhiteSpace(configPath))
-        {
-            return null;
-        }
-
-        var json = File.ReadAllText(configPath);
-        return System.Text.Json.JsonSerializer.Deserialize(json, ExtranetConfigJsonContext.Default.ClientConfig);
-    }
-
-    private static string? FindOptionValue(string[] args, string longName, string shortName)
-    {
-        for (var i = 0; i < args.Length - 1; i++)
-        {
-            if (args[i] == longName || args[i] == shortName)
-            {
-                return args[i + 1];
-            }
-        }
-
-        return null;
     }
 
     private static void EnsureDefaultMapping(ClientConfig config)
@@ -271,66 +202,6 @@ public class Program
         config.Mappings.Add(new TunnelMapping { LocalPort = config.LocalProxyPort });
     }
 
-    private static bool TryParseMapping(string value, out TunnelMapping mapping)
-    {
-        mapping = new TunnelMapping();
-        var equalsIndex = value.IndexOf('=');
-        if (equalsIndex <= 0 || equalsIndex == value.Length - 1)
-        {
-            return false;
-        }
-
-        if (!int.TryParse(value[..equalsIndex], out var localPort))
-        {
-            return false;
-        }
-
-        var targetPart = value[(equalsIndex + 1)..];
-        var parts = targetPart.Split(':');
-        if (parts.Length < 2)
-        {
-            return false;
-        }
-
-        string protocol = "tcp";
-        int targetPort;
-        string targetHost;
-
-        var lastPart = parts[^1];
-        if (string.Equals(lastPart, "udp", StringComparison.OrdinalIgnoreCase) ||
-            string.Equals(lastPart, "tcp", StringComparison.OrdinalIgnoreCase))
-        {
-            protocol = lastPart.ToLowerInvariant();
-            if (parts.Length < 3 || !int.TryParse(parts[^2], out targetPort))
-            {
-                return false;
-            }
-            targetHost = string.Join(":", parts[..^2]);
-        }
-        else
-        {
-            if (!int.TryParse(lastPart, out targetPort))
-            {
-                return false;
-            }
-            targetHost = string.Join(":", parts[..^1]);
-        }
-
-        if (string.IsNullOrWhiteSpace(targetHost))
-        {
-            return false;
-        }
-
-        mapping = new TunnelMapping
-        {
-            LocalPort = localPort,
-            TargetHost = targetHost,
-            TargetPort = targetPort,
-            Protocol = protocol
-        };
-        return true;
-    }
-    
     private static void PrintHelp()
     {
         Console.WriteLine("Usage: LanBridge.ExtranetPeer [options]");
@@ -352,14 +223,4 @@ public class Program
         Console.WriteLine("  --verbose, -v                   Enable detailed KCP diagnostics");
         Console.WriteLine("  --help, -h                      Show this help");
     }
-}
-
-[System.Text.Json.Serialization.JsonSourceGenerationOptions(
-    PropertyNameCaseInsensitive = true,
-    ReadCommentHandling = System.Text.Json.JsonCommentHandling.Skip,
-    AllowTrailingCommas = true
-)]
-[System.Text.Json.Serialization.JsonSerializable(typeof(ClientConfig))]
-internal partial class ExtranetConfigJsonContext : System.Text.Json.Serialization.JsonSerializerContext
-{
 }

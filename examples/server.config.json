@@ -3,6 +3,5 @@
   "stunPort": 9001,
   "stunAlternatePort": 9003,
   "relayPort": 9002,
-  "maxRelaySessions": 100,
-  "relayTimeoutMs": 30000
+  "maxRelaySessions": 100
 }

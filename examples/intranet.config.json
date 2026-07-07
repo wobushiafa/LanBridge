@@ -9,6 +9,7 @@
   "targetSourcePort": 554,
   "udpPort": 0,
   "verbose": false,
+  "enableKcpCongestionControl": false,
   "allowedTargets": [
     {
       "host": "192.168.7.230",

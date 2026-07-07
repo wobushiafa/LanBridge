@@ -1,40 +1,11 @@
 using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
+using LanBridge.Common.Configuration;
 using LanBridge.Common.Network;
 using LanBridge.Common.Protocol;
 
 namespace LanBridge.ExtranetPeer;
-
-public class ClientConfig
-{
-    public string NodeId { get; set; } = "extranet-client-001";
-    public string SignalingServerHost { get; set; } = "127.0.0.1";
-    public int SignalingServerPort { get; set; } = 9000;
-    public string StunServerHost { get; set; } = "127.0.0.1";
-    public int StunServerPort { get; set; } = 9001;
-    public int StunAlternateServerPort { get; set; } = 9003;
-    public string TargetNodeId { get; set; } = "intranet-peer-001";
-    public int LocalProxyPort { get; set; } = 8554;
-    public int UdpPort { get; set; }
-    public int HolePunchTimeoutMs { get; set; } = 10000;
-    public bool EnableRelayFallback { get; set; } = true;
-    public bool Verbose { get; set; }
-    public bool EnableKcpCongestionControl { get; set; } = false;
-    public List<TunnelMapping> Mappings { get; set; } = new();
-}
-
-public class TunnelMapping
-{
-    public int LocalPort { get; set; }
-    public string TargetHost { get; set; } = string.Empty;
-    public int TargetPort { get; set; }
-    public string Protocol { get; set; } = "tcp";
-
-    public string Target => string.IsNullOrWhiteSpace(TargetHost) || TargetPort <= 0
-        ? string.Empty
-        : $"{TargetHost}:{TargetPort}:{Protocol}";
-}
 
 public enum ConnectionState
 {

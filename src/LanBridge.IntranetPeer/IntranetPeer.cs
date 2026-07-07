@@ -2,44 +2,11 @@ using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
+using LanBridge.Common.Configuration;
 using LanBridge.Common.Network;
 using LanBridge.Common.Protocol;
 
 namespace LanBridge.IntranetPeer;
-
-public class PeerConfig
-{
-    public string NodeId { get; set; } = "intranet-peer-001";
-    public string SignalingServerHost { get; set; } = "127.0.0.1";
-    public int SignalingServerPort { get; set; } = 9000;
-    public string StunServerHost { get; set; } = "127.0.0.1";
-    public int StunServerPort { get; set; } = 9001;
-    public int StunAlternateServerPort { get; set; } = 9003;
-    public string Token { get; set; } = "default-token";
-    public int UdpPort { get; set; }
-    public string TargetSourceHost { get; set; } = "127.0.0.1";
-    public int TargetSourcePort { get; set; } = 554;
-    public bool Verbose { get; set; }
-    public bool EnableKcpCongestionControl { get; set; } = false;
-    public List<TargetEndpoint> AllowedTargets { get; set; } = new();
-    public List<AllowedSubnet> AllowedSubnets { get; set; } = new();
-}
-
-public class TargetEndpoint
-{
-    public string Host { get; set; } = string.Empty;
-    public int? Port { get; set; }
-
-    public override string ToString() => Port.HasValue ? $"{Host}:{Port}" : $"{Host}:*";
-}
-
-public class AllowedSubnet
-{
-    public string Cidr { get; set; } = string.Empty;
-    public int? Port { get; set; }
-
-    public override string ToString() => Port.HasValue ? $"{Cidr}:{Port}" : $"{Cidr}:*";
-}
 
 public class IntranetPeer : IDisposable
 {
@@ -445,34 +412,9 @@ public class IntranetPeer : IDisposable
         }
 
         var target = Encoding.UTF8.GetString(payload.Span);
-        var parts = target.Split(':');
-        if (parts.Length < 2)
+        if (!EndpointParser.TryParseHostPortProtocol(target, out var host, out var port, out var protocol))
         {
             throw new InvalidDataException($"Invalid target endpoint: {target}");
-        }
-
-        string protocol = "tcp";
-        int port;
-        string host;
-
-        var lastPart = parts[^1];
-        if (string.Equals(lastPart, "udp", StringComparison.OrdinalIgnoreCase) ||
-            string.Equals(lastPart, "tcp", StringComparison.OrdinalIgnoreCase))
-        {
-            protocol = lastPart.ToLowerInvariant();
-            if (parts.Length < 3 || !int.TryParse(parts[^2], out port))
-            {
-                throw new InvalidDataException($"Invalid target endpoint: {target}");
-            }
-            host = string.Join(":", parts[..^2]);
-        }
-        else
-        {
-            if (!int.TryParse(lastPart, out port))
-            {
-                throw new InvalidDataException($"Invalid target endpoint: {target}");
-            }
-            host = string.Join(":", parts[..^1]);
         }
 
         return (host, port, protocol);
@@ -521,7 +463,7 @@ public class IntranetPeer : IDisposable
 
         foreach (var subnet in _config.AllowedSubnets)
         {
-            if ((subnet.Port.HasValue && subnet.Port != port) || !IsInCidr(address, subnet.Cidr))
+            if ((subnet.Port.HasValue && subnet.Port != port) || !CidrParser.IsInCidr(address, subnet.Cidr))
             {
                 continue;
             }
@@ -530,29 +472,6 @@ public class IntranetPeer : IDisposable
         }
 
         return false;
-    }
-
-    private static bool IsInCidr(IPAddress address, string cidr)
-    {
-        var parts = cidr.Split('/', 2);
-        if (parts.Length != 2 ||
-            !IPAddress.TryParse(parts[0], out var network) ||
-            !int.TryParse(parts[1], out var prefixLength))
-        {
-            return false;
-        }
-
-        var addressBytes = address.GetAddressBytes();
-        var networkBytes = network.GetAddressBytes();
-        if (addressBytes.Length != 4 || networkBytes.Length != 4 || prefixLength < 0 || prefixLength > 32)
-        {
-            return false;
-        }
-
-        var addressValue = BitConverter.ToUInt32(addressBytes.Reverse().ToArray());
-        var networkValue = BitConverter.ToUInt32(networkBytes.Reverse().ToArray());
-        var mask = prefixLength == 0 ? 0u : uint.MaxValue << (32 - prefixLength);
-        return (addressValue & mask) == (networkValue & mask);
     }
 
     private async Task SendTunnelFrameAsync(string sessionId, TunnelFrame frame)

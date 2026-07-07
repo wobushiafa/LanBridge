@@ -10,26 +10,31 @@
   "holePunchTimeoutMs": 10000,
   "enableRelayFallback": true,
   "verbose": false,
+  "enableKcpCongestionControl": false,
   "mappings": [
     {
       "localPort": 8554,
       "targetHost": "192.168.7.230",
-      "targetPort": 554
+      "targetPort": 554,
+      "protocol": "tcp"
     },
     {
       "localPort": 18080,
       "targetHost": "192.168.7.230",
-      "targetPort": 80
+      "targetPort": 80,
+      "protocol": "tcp"
     },
     {
       "localPort": 18081,
       "targetHost": "192.168.7.231",
-      "targetPort": 8080
+      "targetPort": 8080,
+      "protocol": "tcp"
     },
     {
       "localPort": 18082,
       "targetHost": "192.168.7.231",
-      "targetPort": 3000
+      "targetPort": 3000,
+      "protocol": "tcp"
     }
   ]
 }
