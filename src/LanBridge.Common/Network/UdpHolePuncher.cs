@@ -176,12 +176,10 @@ public class UdpHolePuncher : IDisposable
 
     public void StartReceivePump()
     {
-        if (_receivePumpTask != null)
+        if (Interlocked.CompareExchange(ref _receivePumpTask, Task.Run(ReceivePumpAsync), null) != null)
         {
             return;
         }
-
-        _receivePumpTask = Task.Run(ReceivePumpAsync);
     }
 
     private async Task ReceivePumpAsync()
@@ -329,12 +327,13 @@ public class UdpHolePuncher : IDisposable
 
     public async Task SendAsync(byte[] data)
     {
-        if (_remoteEndPoint == null)
+        var ep = _remoteEndPoint;
+        if (ep == null)
         {
             throw new InvalidOperationException("Remote endpoint not set");
         }
 
-        await _udpClient.SendAsync(data, data.Length, _remoteEndPoint);
+        await _udpClient.SendAsync(data, data.Length, ep);
     }
 
     public async Task<UdpReceiveResult> ReceiveAsync()

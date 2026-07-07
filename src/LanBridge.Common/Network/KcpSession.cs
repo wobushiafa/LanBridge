@@ -30,7 +30,7 @@ public class KcpSession : IDisposable
     private readonly object _kcpLock = new();
     private readonly CancellationTokenSource _cts;
     private readonly bool _ownReceiveLoop;
-    private bool _isRunning;
+    private volatile bool _isRunning;
     private long _queuedMessages;
     private long _sentPackets;
     private long _sentBytes;
@@ -176,8 +176,9 @@ public class KcpSession : IDisposable
             {
                 break;
             }
-            catch
+            catch (Exception ex)
             {
+                OnTrace?.Invoke($"KCP update loop error: {ex.Message}");
             }
         }
     }
@@ -195,8 +196,9 @@ public class KcpSession : IDisposable
             {
                 break;
             }
-            catch
+            catch (Exception ex)
             {
+                OnTrace?.Invoke($"KCP receive loop error: {ex.Message}");
             }
         }
     }

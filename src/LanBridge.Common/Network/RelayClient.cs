@@ -8,7 +8,7 @@ public class RelayClient : IDisposable
     private NetworkStream? _stream;
     private readonly CancellationTokenSource _cts;
     private readonly SemaphoreSlim _sendLock = new(1, 1);
-    private bool _isConnected;
+    private volatile bool _isConnected;
 
     public event Action<byte[], int>? OnDataReceived;
     public event Action? OnDisconnected;

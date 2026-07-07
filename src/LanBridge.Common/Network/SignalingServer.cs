@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
@@ -7,8 +8,8 @@ namespace LanBridge.Common.Network;
 public class SignalingServer : IDisposable
 {
     private readonly TcpListener _listener;
-    private readonly Dictionary<string, TcpClient> _clients = new();
-    private readonly Dictionary<string, NetworkStream> _streams = new();
+    private readonly ConcurrentDictionary<string, TcpClient> _clients = new();
+    private readonly ConcurrentDictionary<string, NetworkStream> _streams = new();
     private CancellationTokenSource _cts;
     private bool _isRunning;
 
@@ -106,8 +107,8 @@ public class SignalingServer : IDisposable
         }
         finally
         {
-            _clients.Remove(clientId);
-            _streams.Remove(clientId);
+            _clients.TryRemove(clientId, out _);
+            _streams.TryRemove(clientId, out _);
             client.Dispose();
             OnClientDisconnected?.Invoke(clientId);
         }
@@ -132,8 +133,8 @@ public class SignalingServer : IDisposable
         if (_clients.TryGetValue(clientId, out var client))
         {
             client.Dispose();
-            _clients.Remove(clientId);
-            _streams.Remove(clientId);
+            _clients.TryRemove(clientId, out _);
+            _streams.TryRemove(clientId, out _);
         }
     }
 

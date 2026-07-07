@@ -11,9 +11,9 @@ public class SignalingClient : IDisposable
     private readonly int _serverPort;
     private CancellationTokenSource _cts;
     private readonly SemaphoreSlim _sendLock = new(1, 1);
-    private bool _isConnected;
+    private volatile bool _isConnected;
 
-    public event Action<string>? OnMessageReceived;
+    public event Func<string, Task>? OnMessageReceived;
     public event Action? OnDisconnected;
     public event Action<string>? OnError;
 
@@ -105,7 +105,11 @@ public class SignalingClient : IDisposable
                 }
 
                 var message = Encoding.UTF8.GetString(buffer, 0, messageLength);
-                OnMessageReceived?.Invoke(message);
+                var handler = OnMessageReceived;
+                if (handler != null)
+                {
+                    await handler.Invoke(message);
+                }
             }
         }
         catch (Exception ex)

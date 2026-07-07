@@ -45,7 +45,7 @@ public sealed class ConnectionNegotiator : IDisposable
     private IPEndPoint? _publicEndPointV6;
     private NatDetectionResult? _natDetection;
     private CancellationTokenSource? _relayProbeCts;
-    private bool _isHolePunching;
+    private volatile bool _isHolePunching;
     private string _activeSessionId = "default";
     private DateTime _lastConnectionRequestUtc = DateTime.MinValue;
     private readonly CancellationTokenSource _cts = new();
