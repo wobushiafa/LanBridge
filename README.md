@@ -33,10 +33,10 @@
 - 🤝 **首包零丢失竞态防护**：使用 Task 驱动的异步状态同步结构保护内网目标连接，彻底消除 UDP/KCP 穿透初期的异步数据包到达竞争，实现首包 100% 成功交付。
 - 🔁 **信令自动重连与高可用容灾**：客户端内置后台连接管理器。当信令服务器在启动时离线时，客户端会自动以 5 秒周期进行重试而不会闪退；在运行期如果遭遇信令断连，客户端也能即时捕获，并在信令服务器恢复后自动重建连接并重新注册，保障隧道在无人值守环境下的绝对稳定性。
 - 🔗 **P2P 优先与自动中继后备**：优先尝试打洞建立 P2P UDP 直连；在 NAT 条件极差（如双侧对称 NAT）时，秒级无缝降级到 **Relay 中继模式**。
-- 🌐 **WebSocket 信令传输通道**：在传统 TCP 信令连接基础上，新增 WebSocket 传输选项（`--signaling-transport ws|auto`），适用于受限于 HTTP 代理或防火墙仅允许出站 WebSocket 的网络环境。支持 `auto` 模式自动回退（先 TCP → 失败后 WS）。
 - 🖥️ **实时 TUI 统计仪表盘**：ExtranetPeer 支持 `--tui` / `--dashboard` 启动参数，运行时在终端实时展示传输模式、连接状态、带宽速率、KCP 统计等关键指标，适合运维监控和调试。
 - 🔀 **多隧道多目标路由**：单台 ExtranetPeer 可同时连接多个 IntranetPeer 节点。通过映射中 `@nodeId` 后缀（如 `8554=192.168.7.230:554:tcp@peer-001`）指定每个端口转发到不同的内网节点，内部由 `TunnelRouter` 管理共享 UDP 栈和信令栈。
-- ⏱️ **带宽限速与 QoS 优先级**：每个端口映射可独立配置 `rateLimitBytesPerSec`（字节/秒上限，0 = 不限速）和 `priority`（`high` / `normal` / `low`），确保关键实时流量（如 UDP 视频流）优先于后台大流量传输。
+- 🚧 **WebSocket 信令传输通道** *(开发中)*：在传统 TCP 信令连接基础上，新增 WebSocket 传输选项，适用于受限于 HTTP 代理或防火墙仅允许出站 WebSocket 的网络环境。支持 `auto` 模式自动回退（先 TCP → 失败后 WS）。客户端与服务端代码已实现，CLI 参数与服务端启动集成待完成。
+- 🚧 **带宽限速与 QoS 优先级** *(开发中)*：每个端口映射可独立配置 `rateLimitBytesPerSec`（字节/秒上限，0 = 不限速）和 `priority`（`high` / `normal` / `low`），确保关键实时流量优先于后台大流量传输。数据模型、令牌桶与优先级队列已实现，运行时接入待完成。
 
 ---
 
@@ -128,7 +128,6 @@ LanBridge/
 * **UDP `9001`**：标准 STUN 服务端口
 * **TCP `9002`**：Relay 数据中转端口
 * **UDP `9003`**：辅助 STUN 服务端口（用于高精度 NAT 分类与诊断）
-* **TCP `9010`**：（可选）WebSocket 信令服务端口
 
 ```bash
 # 直接运行启动
@@ -471,15 +470,17 @@ dotnet build LanBridge.slnx -c Debug
 
 ---
 
-## 🌐 WebSocket 信令传输
+## 🌐 WebSocket 信令传输 *(开发中)*
 
-除了传统的 TCP 信令连接外，LanBridge 现在支持通过 **WebSocket** 与信令服务器通信。这在以下场景特别有用：
+> **状态**：客户端 `WebSocketSignalingClient`、服务端 `WebSocketSignalingService` 及 `SignalingConnectionLoop` 的多传输支持代码已实现。当前尚无 CLI 参数暴露（`--signaling-transport`）、服务端未自动启动 WebSocket 监听、配置文件无 `wsPort` 字段。以下为完成后的预期用法，供参考。
+
+除了传统的 TCP 信令连接外，LanBridge 将支持通过 **WebSocket** 与信令服务器通信。这在以下场景特别有用：
 
 * 出站流量受限于 HTTP 代理 / 企业防火墙，仅允许 WebSocket 连接
 * 需要 TLS 加密信令通信（通过反向代理如 Nginx/Caddy 提供 WSS 终结）
 * 与 Web 前端集成
 
-### 使用方式
+### 预期使用方式
 
 信令服务器端默认同时启动 TCP 信令服务（端口 9000），WebSocket 信令服务需要额外配置端口（默认 9010）。
 
@@ -492,7 +493,7 @@ dotnet build LanBridge.slnx -c Debug
 | `auto` | 先尝试 TCP，失败后自动回退到 WebSocket |
 
 ```bash
-# 使用 WebSocket 信令
+# 使用 WebSocket 信令（功能完成后）
 dotnet run --project src/LanBridge.ExtranetPeer -- \
   --signaling-host lanbridge.yourdomain.com \
   --signaling-transport ws \
@@ -608,7 +609,10 @@ dotnet run --project src/LanBridge.ExtranetPeer -- \
 
 内部通过 `TunnelRouter` 管理多个 `ConnectionNegotiator` 实例，共享单一 UDP 栈和信令连接栈，高效利用资源。
 
-### 6. 带宽限速与 QoS 优先级
+### 6. 带宽限速与 QoS 优先级 *(开发中)*
+
+> **状态**：数据模型（`TunnelMapping.RateLimitBytesPerSec`/`Priority`）、令牌桶（`TokenBucket`）、优先级队列（`PriorityFrameQueue`）和 `PeerTransportSession.SetRateLimit`/`SetPriority` API 已实现。当前运行时尚未接入（`SetRateLimit`/`SetPriority` 未被调用），仅可通过 JSON 配置文件设置但不会生效。以下为完成后的预期用法。
+
 通过 JSON 配置文件可以为每个端口映射独立设置带宽限速和 QoS 优先级：
 
 ```json
