@@ -8,6 +8,10 @@ on:
 
 jobs:
   publish:
+    defaults:
+      run:
+        shell: bash
+
     strategy:
       fail-fast: false
       matrix:
@@ -15,7 +19,7 @@ jobs:
           - os: ubuntu-latest
             runtime: linux-x64
             ext: ''
-          - os: ubuntu-latest
+          - os: ubuntu-24.04-arm
             runtime: linux-arm64
             ext: ''
           - os: windows-latest
