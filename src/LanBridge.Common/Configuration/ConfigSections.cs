@@ -25,6 +25,8 @@ public sealed class TransportOptions
     public bool Verbose { get; set; }
     public bool EnableKcpCongestionControl { get; set; }
     public bool EnableTui { get; set; }
+    public string SignalingTransport { get; set; } = "tcp";
+    public int SignalingWsPort { get; set; } = 9010;
 }
 
 public sealed class ExtranetConnectionOptions
@@ -51,6 +53,7 @@ public sealed class ServerPortOptions
     public int StunPort { get; set; } = 9001;
     public int StunAlternatePort { get; set; } = 9003;
     public int RelayPort { get; set; } = 9002;
+    public int WebSocketPort { get; set; }
 }
 
 public sealed class ServerRelayOptions

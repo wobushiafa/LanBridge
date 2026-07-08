@@ -38,6 +38,8 @@ public class PeerConfig
     public int TargetSourcePort { get => Target.Port; set => Target.Port = value; }
     public bool Verbose { get => Transport.Verbose; set => Transport.Verbose = value; }
     public bool EnableKcpCongestionControl { get => Transport.EnableKcpCongestionControl; set => Transport.EnableKcpCongestionControl = value; }
+    public string SignalingTransport { get => Transport.SignalingTransport; set => Transport.SignalingTransport = value; }
+    public int SignalingWsPort { get => Transport.SignalingWsPort; set => Transport.SignalingWsPort = value; }
     public List<TargetEndpoint> AllowedTargets { get; set; } = new();
     public List<AllowedSubnet> AllowedSubnets { get; set; } = new();
 
@@ -167,7 +169,9 @@ public class IntranetPeer : IDisposable
             Token = _config.Identity.Token,
             UdpPort = _config.Transport.UdpPort,
             Verbose = _config.Transport.Verbose,
-            EnableKcpCongestionControl = _config.Transport.EnableKcpCongestionControl
+            EnableKcpCongestionControl = _config.Transport.EnableKcpCongestionControl,
+            SignalingTransport = _config.Transport.SignalingTransport,
+            SignalingWsPort = _config.Transport.SignalingWsPort
         });
         _connection.OnStatusChanged += status => OnStatusChanged?.Invoke(status);
         _connection.OnSessionDataReceived += (sessionId, data, length) => _ = HandleTunnelFrameAsync(sessionId, data, length);

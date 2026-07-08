@@ -43,6 +43,8 @@ public class ClientConfig
     public bool EnableRelayFallback { get => Connection.EnableRelayFallback; set => Connection.EnableRelayFallback = value; }
     public bool Verbose { get => Transport.Verbose; set => Transport.Verbose = value; }
     public bool EnableKcpCongestionControl { get => Transport.EnableKcpCongestionControl; set => Transport.EnableKcpCongestionControl = value; }
+    public string SignalingTransport { get => Transport.SignalingTransport; set => Transport.SignalingTransport = value; }
+    public int SignalingWsPort { get => Transport.SignalingWsPort; set => Transport.SignalingWsPort = value; }
     public List<TunnelMapping> Mappings { get; set; } = new();
 
     public void Validate()
@@ -198,7 +200,9 @@ public class ExtranetPeer : IDisposable
             HolePunchTimeoutMs = _config.Connection.HolePunchTimeoutMs,
             EnableRelayFallback = _config.Connection.EnableRelayFallback,
             Verbose = _config.Transport.Verbose,
-            EnableKcpCongestionControl = _config.Transport.EnableKcpCongestionControl
+            EnableKcpCongestionControl = _config.Transport.EnableKcpCongestionControl,
+            SignalingTransport = _config.Transport.SignalingTransport,
+            SignalingWsPort = _config.Transport.SignalingWsPort
         };
 
         _router = new TunnelRouter(baseOptions, routingTable, _config.Connection.TargetNodeId);

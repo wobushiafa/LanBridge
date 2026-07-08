@@ -39,7 +39,9 @@ public sealed class TunnelRouter : IDisposable
         _signalingStack = new SharedSignalingStack(
             baseOptions.SignalingServerHost,
             baseOptions.SignalingServerPort,
-            status => { });
+            status => { },
+            baseOptions.SignalingTransport,
+            baseOptions.SignalingWsPort);
     }
 
     /// <summary>
@@ -111,7 +113,9 @@ public sealed class TunnelRouter : IDisposable
                 HolePunchTimeoutMs = _baseOptions.HolePunchTimeoutMs,
                 EnableRelayFallback = _baseOptions.EnableRelayFallback,
                 Verbose = _baseOptions.Verbose,
-                EnableKcpCongestionControl = _baseOptions.EnableKcpCongestionControl
+                EnableKcpCongestionControl = _baseOptions.EnableKcpCongestionControl,
+                SignalingTransport = _baseOptions.SignalingTransport,
+                SignalingWsPort = _baseOptions.SignalingWsPort
             };
 
             var negotiator = new ConnectionNegotiator(options, _udpStack, _signalingStack);

@@ -13,6 +13,7 @@ public class Program
     private static ServerConfig _config = new();
     private static StunService? _stunService;
     private static SignalingService? _signalingService;
+    private static WebSocketSignalingService? _wsSignalingService;
     private static RelayService? _relayService;
     private static readonly OperationalTelemetry Telemetry = new();
     
@@ -30,6 +31,7 @@ public class Program
             ("STUN Port", _config.Ports.StunPort.ToString()),
             ("STUN Alternate Port", _config.Ports.StunAlternatePort.ToString()),
             ("Relay Port", _config.Ports.RelayPort.ToString()),
+            ("WebSocket Port", _config.Ports.WebSocketPort == 0 ? "disabled" : _config.Ports.WebSocketPort.ToString()),
             ("Max Relay Sessions", _config.Relay.MaxSessions.ToString()),
             ("Relay Timeout", $"{_config.Relay.IdleTimeoutMs}ms"),
             ("Require Registration Token", _config.Security.RequireRegistrationToken ? "enabled" : "disabled"),
@@ -61,17 +63,23 @@ public class Program
             {
                 ConsoleStatusWriter.WriteServerStatus("Signaling", $"Message from {clientId}: {message.Type}", ConsoleColor.DarkGray);
             };
-            
+
             // 启动中转服务
             _relayService = new RelayService(_config.RelayPort, _config.MaxRelaySessions, _config.RelayTimeoutMs, Telemetry);
-            
+
             // 并行启动所有服务
-            var tasks = new[]
+            var tasks = new List<Task>
             {
                 Task.Run(() => _stunService.StartAsync()),
                 Task.Run(() => _signalingService.StartAsync()),
                 Task.Run(() => _relayService.StartAsync())
             };
+
+            if (_config.WebSocketPort > 0)
+            {
+                _wsSignalingService = new WebSocketSignalingService(_config.WebSocketPort, _signalingService);
+                tasks.Add(Task.Run(() => _wsSignalingService.StartAsync(cts.Token)));
+            }
             var metricsTask = Task.Run(() => ReportMetricsLoopAsync(cts.Token));
             
             ConsoleStatusWriter.WriteServerStatus("Server", "All services started. Press Ctrl+C to shutdown.", ConsoleColor.Green);
@@ -95,6 +103,7 @@ public class Program
         {
             ConsoleStatusWriter.WriteServerStatus("Server", "Shutting down services...", ConsoleColor.Yellow);
             _stunService?.Dispose();
+            _wsSignalingService?.Dispose();
             _signalingService?.Dispose();
             _relayService?.Dispose();
             ConsoleStatusWriter.WriteServerStatus("Server", "Server stopped.", ConsoleColor.Yellow);
@@ -134,6 +143,12 @@ public class Program
                 case "-rp":
                     if (i + 1 < args.Length && int.TryParse(args[++i], out int rp))
                         _config.RelayPort = rp;
+                    break;
+
+                case "--ws-port":
+                case "-wsp":
+                    if (i + 1 < args.Length && int.TryParse(args[++i], out int wsp))
+                        _config.WebSocketPort = wsp;
                     break;
 
                 case "--relay-timeout":
@@ -192,6 +207,7 @@ public class Program
         Console.WriteLine("  --stun-port, -stun <port>      STUN server port (default: 9001)");
         Console.WriteLine("  --stun-alt-port <port>         Alternate STUN port for NAT detection (default: 9003)");
         Console.WriteLine("  --relay-port, -rp <port>       Relay server port (default: 9002)");
+        Console.WriteLine("  --ws-port, -wsp <port>         WebSocket signaling port (default: disabled; e.g. 9010 to enable)");
         Console.WriteLine("  --relay-timeout <ms>           Relay idle timeout in ms (default: 30000)");
         Console.WriteLine("  --require-token                Require registration token for intranet node registration");
         Console.WriteLine("  --registration-token <token>   Add an allowed registration token (repeatable)");

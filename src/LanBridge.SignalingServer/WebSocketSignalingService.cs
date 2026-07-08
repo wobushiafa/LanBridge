@@ -46,12 +46,20 @@ public sealed class WebSocketSignalingService : IDisposable
 
                 var wsContext = await context.AcceptWebSocketAsync(null);
                 var clientId = Guid.NewGuid().ToString("N")[..8];
-                _clients[clientId] = wsContext.WebSocket;
+                var ws = wsContext.WebSocket;
+                _clients[clientId] = ws;
+
+                _signalingService.RegisterTransportSender(
+                    clientId,
+                    (msg, _) => SendToClientAsync(clientId, msg),
+                    () => ws.State == WebSocketState.Open
+                        ? ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "Server disconnect", CancellationToken.None)
+                        : Task.CompletedTask);
 
                 Console.WriteLine($"[WebSocket] Client connected: {clientId}");
-                _ = Task.Run(() => HandleClientAsync(clientId, wsContext.WebSocket, ct), ct);
+                _ = Task.Run(() => HandleClientAsync(clientId, ws, ct), ct);
             }
-            catch (Exception ex) when (!_isRunning)
+            catch (Exception) when (!_isRunning)
             {
                 break;
             }
@@ -106,6 +114,7 @@ public sealed class WebSocketSignalingService : IDisposable
         }
         finally
         {
+            _signalingService.OnTransportClientDisconnected(clientId);
             _clients.TryRemove(clientId, out _);
 
             try

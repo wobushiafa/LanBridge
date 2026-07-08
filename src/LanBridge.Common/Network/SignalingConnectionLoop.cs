@@ -11,7 +11,7 @@ public sealed class SignalingConnectionLoop : IDisposable
     private readonly Action<string>? _statusSink;
     private readonly Action? _onDisconnected;
     private readonly Func<string, Task> _onMessageAsync;
-    private readonly Func<SignalingClient, Task> _onConnectedAsync;
+    private readonly Func<SignalingTransportBase?, Task> _onConnectedAsync;
     private readonly string _transportType; // "tcp", "ws", "auto"
     private readonly int _wsPort;
     private SignalingTransportBase? _transport;
@@ -37,7 +37,7 @@ public sealed class SignalingConnectionLoop : IDisposable
         Action<string>? statusSink,
         Action? onDisconnected,
         Func<string, Task> onMessageAsync,
-        Func<SignalingClient, Task> onConnectedAsync,
+        Func<SignalingTransportBase?, Task> onConnectedAsync,
         string transportType = "tcp",
         int wsPort = 9010)
     {
@@ -139,9 +139,7 @@ public sealed class SignalingConnectionLoop : IDisposable
             _transport = client;
             await client.ConnectAsync();
             _statusSink?.Invoke("Connected to signaling server (WebSocket)");
-
-            // For WebSocket, we still call the connected callback but with null SignalingClient
-            // The transport abstraction handles send/receive via the base class
+            await _onConnectedAsync(client);
             return true;
         }
         catch (Exception ex)

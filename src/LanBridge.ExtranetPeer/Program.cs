@@ -27,6 +27,8 @@ public class Program
             ("Proxy Port", config.Proxy.LocalPort.ToString()),
             ("Hole Punch Timeout", $"{config.Connection.HolePunchTimeoutMs}ms"),
             ("Relay Fallback", config.Connection.EnableRelayFallback ? "enabled" : "disabled"),
+            ("Signaling Transport", config.Transport.SignalingTransport),
+            ("WebSocket Port", config.Transport.SignalingWsPort.ToString()),
             ("Verbose", config.Transport.Verbose ? "enabled" : "disabled")
         };
         configurationItems.AddRange(config.Mappings.Select(mapping =>
@@ -169,6 +171,16 @@ public class Program
                     config.EnableRelayFallback = false;
                     break;
 
+                case "--signaling-transport":
+                    if (i + 1 < args.Length)
+                        config.SignalingTransport = args[++i];
+                    break;
+
+                case "--ws-port":
+                    if (i + 1 < args.Length && int.TryParse(args[++i], out int wsPort))
+                        config.SignalingWsPort = wsPort;
+                    break;
+
                 case "--verbose":
                 case "-v":
                     config.Verbose = true;
@@ -257,6 +269,8 @@ public class Program
         Console.WriteLine("  --udp-port, -up <port>          UDP port for P2P (default: random)");
         Console.WriteLine("  --punch-timeout, -pt <ms>       Hole punch timeout in ms (default: 10000)");
         Console.WriteLine("  --no-relay                      Disable relay fallback");
+        Console.WriteLine("  --signaling-transport <tcp|ws|auto> Signaling transport (default: tcp)");
+        Console.WriteLine("  --ws-port <port>                WebSocket signaling port (default: 9010)");
         Console.WriteLine("  --verbose, -v                   Enable detailed KCP diagnostics");
         Console.WriteLine("  --help, -h                      Show this help");
     }

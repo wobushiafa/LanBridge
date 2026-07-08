@@ -19,7 +19,9 @@ public sealed class SharedSignalingStack : IDisposable
     public SharedSignalingStack(
         string host,
         int port,
-        Action<string>? statusSink)
+        Action<string>? statusSink,
+        string transportType = "tcp",
+        int wsPort = 9010)
     {
         _dispatcher = new SignalingMessageDispatcher(statusSink);
 
@@ -29,7 +31,9 @@ public sealed class SharedSignalingStack : IDisposable
             statusSink,
             onDisconnected: () => { },
             onMessageAsync: message => _dispatcher.DispatchAsync(message),
-            onConnectedAsync: _ => Task.CompletedTask);
+            onConnectedAsync: _ => Task.CompletedTask,
+            transportType,
+            wsPort);
     }
 
     public void Dispose()

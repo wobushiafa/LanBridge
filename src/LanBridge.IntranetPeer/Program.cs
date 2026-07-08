@@ -26,6 +26,8 @@ public class Program
             ("Target Source", $"{config.Target.Host}:{config.Target.Port}"),
             ("Allowed Targets", string.Join(", ", config.AllowedTargets)),
             ("Allowed Subnets", string.Join(", ", config.AllowedSubnets)),
+            ("Signaling Transport", config.Transport.SignalingTransport),
+            ("WebSocket Port", config.Transport.SignalingWsPort.ToString()),
             ("Verbose", config.Transport.Verbose ? "enabled" : "disabled")
         });
         
@@ -152,6 +154,16 @@ public class Program
                 case "-up":
                     if (i + 1 < args.Length && int.TryParse(args[++i], out int up))
                         config.UdpPort = up;
+                    break;
+
+                case "--signaling-transport":
+                    if (i + 1 < args.Length)
+                        config.SignalingTransport = args[++i];
+                    break;
+
+                case "--ws-port":
+                    if (i + 1 < args.Length && int.TryParse(args[++i], out int wsPort))
+                        config.SignalingWsPort = wsPort;
                     break;
 
                 case "--verbose":
@@ -304,6 +316,8 @@ public class Program
         Console.WriteLine("  --allow-subnet <cidr[:port|:*]> Allow subnet, e.g. 192.168.7.0/24 or 192.168.7.0/24:554");
         Console.WriteLine("  --allow-subnets <list>          Allow comma-separated subnets");
         Console.WriteLine("  --udp-port, -up <port>          UDP port for P2P (default: random)");
+        Console.WriteLine("  --signaling-transport <tcp|ws|auto> Signaling transport (default: tcp)");
+        Console.WriteLine("  --ws-port <port>                WebSocket signaling port (default: 9010)");
         Console.WriteLine("  --verbose, -v                   Enable detailed KCP diagnostics");
         Console.WriteLine("  --help, -h                      Show this help");
     }

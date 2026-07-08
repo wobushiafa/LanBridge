@@ -29,6 +29,8 @@ public sealed class PeerConnectionOptions
     public bool EnableRelayFallback { get; init; } = true;
     public bool Verbose { get; init; }
     public bool EnableKcpCongestionControl { get; init; } = false;
+    public string SignalingTransport { get; init; } = "tcp";
+    public int SignalingWsPort { get; init; } = 9010;
 }
 
 public sealed class ConnectionNegotiator : IDisposable, ISignalingHandler
@@ -95,7 +97,9 @@ public sealed class ConnectionNegotiator : IDisposable, ISignalingHandler
             status => OnStatusChanged?.Invoke(status),
             () => OnSignalingDisconnected?.Invoke(),
             message => _standaloneRouter.DispatchAsync(message),
-            HandleSignalingConnectedAsync);
+            HandleSignalingConnectedAsync,
+            _options.SignalingTransport,
+            _options.SignalingWsPort);
     }
 
     /// <summary>
@@ -353,7 +357,7 @@ public sealed class ConnectionNegotiator : IDisposable, ISignalingHandler
             return;
         }
 
-        var client = _signalingConnectionLoop.Client;
+        var client = _signalingConnectionLoop.Transport;
         if (client?.IsConnected != true)
         {
             return;
@@ -395,7 +399,7 @@ public sealed class ConnectionNegotiator : IDisposable, ISignalingHandler
 
     private async Task RegisterNodeAsync()
     {
-        var client = _signalingConnectionLoop.Client;
+        var client = _signalingConnectionLoop.Transport;
         if (client == null)
         {
             return;
@@ -658,7 +662,7 @@ public sealed class ConnectionNegotiator : IDisposable, ISignalingHandler
 
     private async Task RequestRelayAsync()
     {
-        var client = _signalingConnectionLoop.Client;
+        var client = _signalingConnectionLoop.Transport;
         if (client?.IsConnected != true || string.IsNullOrWhiteSpace(_options.TargetNodeId))
         {
             return;
@@ -816,7 +820,7 @@ public sealed class ConnectionNegotiator : IDisposable, ISignalingHandler
         _sessions.Clear();
     }
 
-    private async Task HandleSignalingConnectedAsync(SignalingClient client)
+    private async Task HandleSignalingConnectedAsync(SignalingTransportBase? transport)
     {
         if (_options.Role == PeerConnectionRole.Intranet)
         {
