@@ -5,7 +5,8 @@
   <a href="#-系统架构"><strong>系统架构</strong></a> |
   <a href="#-快速开始"><strong>快速开始</strong></a> |
   <a href="#-配置文件示例"><strong>配置指南</strong></a> |
-  <a href="#-传输模式与性能性能调优"><strong>性能调优</strong></a> |
+  <a href="#-websocket-信令传输"><strong>WebSocket 信令</strong></a> |
+  <a href="#-传输模式与性能调优"><strong>性能调优</strong></a> |
   <a href="#-访问控制与安全"><strong>访问控制</strong></a>
 </p>
 
@@ -32,6 +33,10 @@
 - 🤝 **首包零丢失竞态防护**：使用 Task 驱动的异步状态同步结构保护内网目标连接，彻底消除 UDP/KCP 穿透初期的异步数据包到达竞争，实现首包 100% 成功交付。
 - 🔁 **信令自动重连与高可用容灾**：客户端内置后台连接管理器。当信令服务器在启动时离线时，客户端会自动以 5 秒周期进行重试而不会闪退；在运行期如果遭遇信令断连，客户端也能即时捕获，并在信令服务器恢复后自动重建连接并重新注册，保障隧道在无人值守环境下的绝对稳定性。
 - 🔗 **P2P 优先与自动中继后备**：优先尝试打洞建立 P2P UDP 直连；在 NAT 条件极差（如双侧对称 NAT）时，秒级无缝降级到 **Relay 中继模式**。
+- 🌐 **WebSocket 信令传输通道**：在传统 TCP 信令连接基础上，新增 WebSocket 传输选项（`--signaling-transport ws|auto`），适用于受限于 HTTP 代理或防火墙仅允许出站 WebSocket 的网络环境。支持 `auto` 模式自动回退（先 TCP → 失败后 WS）。
+- 🖥️ **实时 TUI 统计仪表盘**：ExtranetPeer 支持 `--tui` / `--dashboard` 启动参数，运行时在终端实时展示传输模式、连接状态、带宽速率、KCP 统计等关键指标，适合运维监控和调试。
+- 🔀 **多隧道多目标路由**：单台 ExtranetPeer 可同时连接多个 IntranetPeer 节点。通过映射中 `@nodeId` 后缀（如 `8554=192.168.7.230:554:tcp@peer-001`）指定每个端口转发到不同的内网节点，内部由 `TunnelRouter` 管理共享 UDP 栈和信令栈。
+- ⏱️ **带宽限速与 QoS 优先级**：每个端口映射可独立配置 `rateLimitBytesPerSec`（字节/秒上限，0 = 不限速）和 `priority`（`high` / `normal` / `low`），确保关键实时流量（如 UDP 视频流）优先于后台大流量传输。
 
 ---
 
@@ -42,11 +47,16 @@ flowchart TB
     subgraph Extranet ["外网客户端 ExtranetPeer"]
         LocalTCP["TCP 代理监听器"]
         LocalUDP["UDP 代理监听器"]
-        ExtSession["会话流分发器 StreamId"]
+        ExtSession["TunnelRouter 多目标路由器"]
+        TUI["TUI 统计仪表盘"]
     end
 
     subgraph Internet ["公网基础设施"]
-        Server["LanBridge.SignalingServer - 信令 / STUN / Relay 中继"]
+        Server["LanBridge.SignalingServer"]
+        TCP["TCP 信令 :9000"]
+        WS["WebSocket 信令 :9010"]
+        STUN["STUN :9001/:9003"]
+        Relay["Relay 中继 :9002"]
     end
 
     subgraph Intranet ["内网端 IntranetPeer"]
@@ -63,13 +73,18 @@ flowchart TB
     %% 信令连接
     LocalTCP --> ExtSession
     LocalUDP --> ExtSession
-    ExtSession -->|双向信令交互| Server
-    IntSession -->|双向信令注册| Server
+    ExtSession -->|TCP 或 WebSocket 信令| TCP
+    ExtSession -->|WebSocket 信令 可选| WS
+    IntSession -->|TCP 或 WebSocket 信令| TCP
+
+    %% STUN / Relay
+    ExtSession -.->|STUN NAT 诊断| STUN
+    IntSession -.->|STUN NAT 诊断| STUN
 
     %% 穿透与回退链路
     ExtSession -.->|⚡ P2P UDP 直连打洞 - KCP 1024 窗口| IntSession
-    ExtSession ==>|🛡️ Relay Fallback 极速中继| Server
-    Server ==> IntSession
+    ExtSession ==>|🛡️ Relay Fallback 极速中继| Relay
+    Relay ==> IntSession
 
     %% 局域网分发
     IntSession --> TargetRouter
@@ -77,11 +92,14 @@ flowchart TB
     TargetRouter -->|TCP / UDP 转发| RTSP
     TargetRouter -->|UDP 转发| Game
 
+    %% TUI
+    ExtSession --- TUI
+
     classDef peer fill:#1e293b,stroke:#3b82f6,stroke-width:2px,color:#f8fafc;
     classDef server fill:#1e1b4b,stroke:#818cf8,stroke-width:2px,color:#f8fafc;
     classDef lan fill:#022c22,stroke:#10b981,stroke-width:2px,color:#f8fafc;
-    class LocalTCP,LocalUDP,ExtSession,IntSession,TargetRouter peer;
-    class Server server;
+    class LocalTCP,LocalUDP,ExtSession,TUI,IntSession,TargetRouter peer;
+    class Server,TCP,WS,STUN,Relay server;
     class HTTP,RTSP,Game lan;
 ```
 
@@ -92,10 +110,10 @@ flowchart TB
 ```text
 LanBridge/
 ├── src/
-│   ├── LanBridge.Common/           # 核心公共库：STUN协议实现、KCP传输层优化、安全帧定义
-│   ├── LanBridge.SignalingServer/  # 公网服务端：信令握手、NAT分类诊断、UDP中转中继服务
+│   ├── LanBridge.Common/           # 核心公共库：STUN协议、KCP传输层、安全帧、WebSocket信令客户端、TUI仪表盘、多目标路由
+│   ├── LanBridge.SignalingServer/  # 公网服务端：TCP/WebSocket信令、STUN NAT诊断、TCP中继服务
 │   ├── LanBridge.IntranetPeer/     # 内网穿透客户端：并发白名单访问控制、TCP/UDP双向连接池
-│   └── LanBridge.ExtranetPeer/     # 外网访问客户端：本地TCP/UDP端口监听与虚会话代理
+│   └── LanBridge.ExtranetPeer/     # 外网访问客户端：本地TCP/UDP端口监听、多目标路由、TUI仪表盘
 └── examples/                       # 标准生产配置模板 (TCP & UDP 样例)
 ```
 
@@ -110,6 +128,7 @@ LanBridge/
 * **UDP `9001`**：标准 STUN 服务端口
 * **TCP `9002`**：Relay 数据中转端口
 * **UDP `9003`**：辅助 STUN 服务端口（用于高精度 NAT 分类与诊断）
+* **TCP `9010`**：（可选）WebSocket 信令服务端口
 
 ```bash
 # 直接运行启动
@@ -117,6 +136,11 @@ dotnet run --project src/LanBridge.SignalingServer
 
 # 或加载自定义配置文件
 dotnet run --project src/LanBridge.SignalingServer -- -c server.config.json
+
+# 启用注册令牌保护
+dotnet run --project src/LanBridge.SignalingServer -- \
+  --require-token \
+  --registration-token lanbridge-prod-token
 ```
 
 ---
@@ -133,14 +157,31 @@ dotnet run --project src/LanBridge.IntranetPeer -- \
 ```
 
 > [!TIP]
-> 也可以通过指定多个 `--allow-target 192.168.7.230:554` 来进行极细粒度的端口安全隔离限制。
+> 也可以通过指定多个 `--allow-target 192.168.7.230:554` 来进行极细粒度的端口安全隔离限制。如需通过注册令牌保护，加上 `--token <your-token>` 参数。
+
+**常用参数速查：**
+
+| 参数 | 缩写 | 说明 | 默认值 |
+|------|------|------|--------|
+| `--signaling-host` | `-sh` | 信令服务器地址 | `127.0.0.1` |
+| `--signaling-port` | `-sp` | 信令服务器端口 | `9000` |
+| `--stun-host` | `-sth` | STUN 服务器地址 | `127.0.0.1` |
+| `--stun-port` | `-stp` | STUN 服务器端口 | `9001` |
+| `--stun-alt-port` | — | STUN 辅助端口 | `9003` |
+| `--token` | `-t` | 注册令牌 | `default-token` |
+| `--target-host` | `-th` | 默认目标主机 | `127.0.0.1` |
+| `--target-port` | `-tp` | 默认目标端口 | `554` |
+| `--allow-target` | `-at` | 允许的目标 `host[:port\|:*]` | — |
+| `--allow-subnet` | — | 允许的子网 `cidr[:port]` | — |
+| `--udp-port` | `-up` | P2P UDP 端口 | 随机 |
+| `--verbose` | `-v` | 详细 KCP 诊断 | `false` |
 
 ---
 
 ### 3. 启动外网访问客户端 (ExtranetPeer)
 
-使用强大的 `-m` / `--map` 标志支持跨协议配置（格式：`localPort=targetHost:targetPort[:protocol]`）。
-如果未指定可选的协议后缀，将默认作为 `tcp` 代理运行。
+使用强大的 `-m` / `--map` 标志支持跨协议配置（格式：`localPort=targetHost:targetPort[:protocol][@nodeId]`）。
+如果未指定可选的协议后缀，将默认作为 `tcp` 代理运行。使用 `@nodeId` 后缀可将特定映射路由到不同的内网节点（多隧道模式）。
 
 ```bash
 dotnet run --project src/LanBridge.ExtranetPeer -- \
@@ -153,11 +194,39 @@ dotnet run --project src/LanBridge.ExtranetPeer -- \
   -m 53=8.8.8.8:53:udp
 ```
 
+**多隧道模式**：同时连接多个内网节点：
+
+```bash
+dotnet run --project src/LanBridge.ExtranetPeer -- \
+  --signaling-host lanbridge.yourdomain.com \
+  --stun-host lanbridge.yourdomain.com \
+  -m 8554=192.168.7.230:554:tcp@intranet-peer-001 \
+  -m 9000=10.0.0.5:9000:tcp@intranet-peer-002
+```
+
 启动后，您可直接在本机对外网端暴露的代理端口发起请求：
 * 访问内网 RTSP 视频流：`rtsp://127.0.0.1:8554/live`
 * 访问内网 Web 页面：`http://127.0.0.1:18080`
 * 访问内网 UDP Echo 或 游戏服务：发往 `127.0.0.1:9999` (UDP)
 * 访问穿透的 DNS 解析服务：发往 `127.0.0.1:53` (UDP)
+
+**常用参数速查：**
+
+| 参数 | 缩写 | 说明 | 默认值 |
+|------|------|------|--------|
+| `--signaling-host` | `-sh` | 信令服务器地址 | `127.0.0.1` |
+| `--signaling-port` | `-sp` | 信令服务器端口 | `9000` |
+| `--stun-host` | `-sth` | STUN 服务器地址 | `127.0.0.1` |
+| `--stun-port` | `-stp` | STUN 服务器端口 | `9001` |
+| `--stun-alt-port` | — | STUN 辅助端口 | `9003` |
+| `--target-node` | `-tn` | 默认目标内网节点 ID | `intranet-peer-001` |
+| `--local-port` | `-lp` | 本地代理端口 | `8554` |
+| `--map` | `-m` | 端口映射 `local=host:port[:proto][@nodeId]` | — |
+| `--udp-port` | `-up` | P2P UDP 端口 | 随机 |
+| `--punch-timeout` | `-pt` | 打洞超时 (ms) | `10000` |
+| `--no-relay` | — | 禁用中继后备 | — |
+| `--tui` / `--dashboard` | — | 启用 TUI 实时仪表盘 | `false` |
+| `--verbose` | `-v` | 详细 KCP 诊断 | `false` |
 
 ---
 
@@ -181,12 +250,17 @@ dotnet run --project src/LanBridge.ExtranetPeer -- \
 
 `ExtranetPeer`
 
-* `Identity`：`nodeId`
+* `Identity`：`nodeId`、`token`
 * `Signaling`：`signalingServerHost`、`signalingServerPort`
 * `Stun`：`stunServerHost`、`stunServerPort`、`stunAlternateServerPort`
 * `Connection`：`targetNodeId`、`holePunchTimeoutMs`、`enableRelayFallback`
 * `Proxy`：`localProxyPort`、`mappings`
-* `Transport`：`udpPort`、`verbose`、`enableKcpCongestionControl`
+* `Transport`：`udpPort`、`verbose`、`enableKcpCongestionControl`、`enableTui`
+
+映射条目 (`mappings[]`) 额外支持：
+* `targetNodeId`：指定该映射路由到哪个内网节点（覆盖全局 `--target-node`）
+* `rateLimitBytesPerSec`：带宽限速（字节/秒，0 = 不限速）
+* `priority`：QoS 优先级 (`high` / `normal` / `low`)，默认按协议自动推导（UDP = high，TCP = normal）
 
 `IntranetPeer`
 
@@ -278,7 +352,8 @@ dotnet run --project src/LanBridge.ExtranetPeer -- \
   "transport": {
     "udpPort": 0,
     "verbose": false,
-    "enableKcpCongestionControl": false
+    "enableKcpCongestionControl": false,
+    "enableTui": false
   },
   "mappings": [
     {
@@ -298,6 +373,15 @@ dotnet run --project src/LanBridge.ExtranetPeer -- \
       "targetHost": "192.168.7.230",
       "targetPort": 9999,
       "protocol": "udp"
+    },
+    {
+      "localPort": 9000,
+      "targetHost": "10.0.0.5",
+      "targetPort": 9000,
+      "protocol": "tcp",
+      "targetNodeId": "intranet-peer-002",
+      "rateLimitBytesPerSec": 0,
+      "priority": "normal"
     }
   ]
 }
@@ -387,6 +471,47 @@ dotnet build LanBridge.slnx -c Debug
 
 ---
 
+## 🌐 WebSocket 信令传输
+
+除了传统的 TCP 信令连接外，LanBridge 现在支持通过 **WebSocket** 与信令服务器通信。这在以下场景特别有用：
+
+* 出站流量受限于 HTTP 代理 / 企业防火墙，仅允许 WebSocket 连接
+* 需要 TLS 加密信令通信（通过反向代理如 Nginx/Caddy 提供 WSS 终结）
+* 与 Web 前端集成
+
+### 使用方式
+
+信令服务器端默认同时启动 TCP 信令服务（端口 9000），WebSocket 信令服务需要额外配置端口（默认 9010）。
+
+客户端通过 `--signaling-transport` 参数选择传输模式：
+
+| 模式 | 说明 |
+|------|------|
+| `tcp` | 默认，仅使用 TCP 信令连接 |
+| `ws` | 仅使用 WebSocket 信令连接 |
+| `auto` | 先尝试 TCP，失败后自动回退到 WebSocket |
+
+```bash
+# 使用 WebSocket 信令
+dotnet run --project src/LanBridge.ExtranetPeer -- \
+  --signaling-host lanbridge.yourdomain.com \
+  --signaling-transport ws \
+  --target-node intranet-peer-001 \
+  -m 8554=192.168.7.230:554
+
+# 自动模式（推荐）
+dotnet run --project src/LanBridge.ExtranetPeer -- \
+  --signaling-host lanbridge.yourdomain.com \
+  --signaling-transport auto \
+  --target-node intranet-peer-001 \
+  -m 8554=192.168.7.230:554
+```
+
+> [!NOTE]
+> WebSocket 信令仅影响信令通道（注册、打洞协调），数据传输仍通过 P2P UDP（KCP）或 TCP Relay 进行。
+
+---
+
 ## 📈 传输模式与性能调优
 
 在打洞测试过程中，LanBridge 终端控制台会醒目显示当前通道模式：
@@ -402,6 +527,19 @@ dotnet build LanBridge.slnx -c Debug
 * **内网访问白名单**：使用 `--allow-target` / `--allow-subnet` 仅暴露必要目标。
 * **服务端注册令牌**：为 `LanBridge.SignalingServer` 启用 `--require-token` 与一个或多个 `--registration-token`。
 * **持续验证**：在发版前至少跑一次 `dotnet test` 和 `--smoke-only`。
+
+**服务端常用参数速查：**
+
+| 参数 | 缩写 | 说明 | 默认值 |
+|------|------|------|--------|
+| `--signaling-port` | `-sp` | 信令服务端口 | `9000` |
+| `--stun-port` | `-stun` | STUN 服务端口 | `9001` |
+| `--stun-alt-port` | — | STUN 辅助端口 | `9003` |
+| `--relay-port` | `-rp` | 中继端口 | `9002` |
+| `--relay-timeout` | — | 中继空闲超时 (ms) | `30000` |
+| `--require-token` | — | 启用注册令牌保护 | `false` |
+| `--registration-token` | — | 允许的注册令牌（可重复） | — |
+| `--metrics-interval` | — | 指标上报间隔 (秒) | `30` |
 
 服务端示例：
 
@@ -455,6 +593,54 @@ LanBridge 在核心数据通路上实现了全链条零拷贝：
 KCP 本身提供拥塞控制（类似于 TCP 的 AIMD），在丢包时会收缩发送窗口（cwnd 降为 1）以确保公平性：
 - **默认建议关闭（`false`）**：对 RTSP 视频拉流、实时游戏等高吞吐且极度敏感超时的 UDP 会话，任何微小丢包导致的拥塞窗口收缩都会造成视频分片传输超时。关闭拥塞控制可让 KCP 全速依靠 1024 窗口（Flow Control）进行极速发送，消除卡顿和播放器连接超时。
 - **可选开启（`true`）**：仅在公网极度拥堵、且传输任务为文件分发或后台非实时大流量等网络公平性要求极高的场景下开启。
+
+### 5. 多隧道多目标路由
+单台 ExtranetPeer 可同时连接多个不同的 IntranetPeer 节点，将不同本地端口映射到不同内网环境中的目标：
+
+```bash
+# peer-001 所在网段可访问 192.168.7.x，peer-002 可访问 10.0.0.x
+dotnet run --project src/LanBridge.ExtranetPeer -- \
+  --signaling-host lanbridge.yourdomain.com \
+  --stun-host lanbridge.yourdomain.com \
+  -m 8554=192.168.7.230:554:tcp@intranet-peer-001 \
+  -m 9000=10.0.0.5:9000:tcp@intranet-peer-002
+```
+
+内部通过 `TunnelRouter` 管理多个 `ConnectionNegotiator` 实例，共享单一 UDP 栈和信令连接栈，高效利用资源。
+
+### 6. 带宽限速与 QoS 优先级
+通过 JSON 配置文件可以为每个端口映射独立设置带宽限速和 QoS 优先级：
+
+```json
+{
+  "localPort": 8554,
+  "targetHost": "192.168.7.230",
+  "targetPort": 554,
+  "protocol": "tcp",
+  "rateLimitBytesPerSec": 1048576,
+  "priority": "high"
+}
+```
+
+* `rateLimitBytesPerSec`：每秒最大传输字节数，`0` 表示不限速（默认）
+* `priority`：QoS 优先级，影响发送队列顺序
+  * `high`：优先发送（适用于实时音视频、游戏）
+  * `normal`：默认优先级（适用于 HTTP、文件传输）
+  * `low`：最后发送（适用于后台同步等低优先级流量）
+  * 不设置时按协议自动推导：UDP = `high`，TCP = `normal`
+
+### 7. TUI 实时统计仪表盘
+ExtranetPeer 支持 `--tui` 或 `--dashboard` 启动参数，在终端中实时展示连接状态和性能指标：
+
+```bash
+dotnet run --project src/LanBridge.ExtranetPeer -- \
+  --tui \
+  --signaling-host lanbridge.yourdomain.com \
+  --target-node intranet-peer-001 \
+  -m 8554=192.168.7.230:554
+```
+
+仪表盘展示内容包括：传输模式（P2P/Relay）、连接状态、实时带宽速率、KCP 窗口/重传统计等。
 
 ---
 
