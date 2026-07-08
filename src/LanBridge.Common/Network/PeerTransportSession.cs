@@ -137,6 +137,18 @@ public sealed class PeerTransportSession : IDisposable
         _priority = priority;
     }
 
+    /// <summary>
+    /// Apply rate limiting for an out-of-band send path (e.g. raw UDP UnreliableData
+    /// that bypasses <see cref="SendAsync"/>). Zero overhead when no bucket is configured.
+    /// </summary>
+    public async Task ApplyRateLimitAsync(int length, CancellationToken ct)
+    {
+        if (_tokenBucket != null && !_tokenBucket.TryConsume(length))
+        {
+            await _tokenBucket.WaitForTokensAsync(length, ct);
+        }
+    }
+
     private async Task SendCoreAsync(byte[] data, int offset, int length)
     {
         KcpSession? kcp;

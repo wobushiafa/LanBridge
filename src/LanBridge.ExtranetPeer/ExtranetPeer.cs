@@ -185,6 +185,47 @@ public class ExtranetPeer : IDisposable
             routingTable[mapping.LocalPort] = nodeId;
         }
 
+        // Derive per-node QoS: most-restrictive (smallest non-zero) rate limit and
+        // highest priority (lowest numeric value) across all mappings to the same node.
+        var nodeQos = new Dictionary<string, (long RateLimitBytesPerSec, FramePriority Priority)>(StringComparer.OrdinalIgnoreCase);
+        foreach (var grouping in _config.Mappings.GroupBy(m => m.TargetNodeId ?? _config.Connection.TargetNodeId))
+        {
+            var nodeId = grouping.Key;
+            if (string.IsNullOrWhiteSpace(nodeId))
+            {
+                continue;
+            }
+
+            long rateLimit = 0;
+            FramePriority priority = FramePriority.Normal;
+            bool first = true;
+            foreach (var mapping in grouping)
+            {
+                if (mapping.RateLimitBytesPerSec > 0)
+                {
+                    rateLimit = rateLimit == 0
+                        ? mapping.RateLimitBytesPerSec
+                        : Math.Min(rateLimit, mapping.RateLimitBytesPerSec);
+                }
+
+                if (first)
+                {
+                    priority = mapping.EffectivePriority;
+                    first = false;
+                }
+                else
+                {
+                    var candidate = (byte)mapping.EffectivePriority;
+                    var current = (byte)priority;
+                    if (candidate < current)
+                    {
+                        priority = mapping.EffectivePriority;
+                    }
+                }
+            }
+            nodeQos[nodeId] = (rateLimit, priority);
+        }
+
         var baseOptions = new PeerConnectionOptions
         {
             Role = PeerConnectionRole.Extranet,
@@ -205,7 +246,7 @@ public class ExtranetPeer : IDisposable
             SignalingWsPort = _config.Transport.SignalingWsPort
         };
 
-        _router = new TunnelRouter(baseOptions, routingTable, _config.Connection.TargetNodeId);
+        _router = new TunnelRouter(baseOptions, routingTable, _config.Connection.TargetNodeId, nodeQos);
     }
 
     public async Task StartAsync()

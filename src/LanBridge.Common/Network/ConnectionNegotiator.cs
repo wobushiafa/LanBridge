@@ -31,6 +31,8 @@ public sealed class PeerConnectionOptions
     public bool EnableKcpCongestionControl { get; init; } = false;
     public string SignalingTransport { get; init; } = "tcp";
     public int SignalingWsPort { get; init; } = 9010;
+    public long RateLimitBytesPerSec { get; init; }
+    public FramePriority Priority { get; init; } = FramePriority.Normal;
 }
 
 public sealed class ConnectionNegotiator : IDisposable, ISignalingHandler
@@ -306,6 +308,7 @@ public sealed class ConnectionNegotiator : IDisposable, ISignalingHandler
         {
             try
             {
+                await session.ApplyRateLimitAsync(length, CancellationToken.None);
                 await puncher.Client.SendAsync(new ReadOnlyMemory<byte>(data, offset, length), puncher.RemoteEndPoint);
                 return;
             }
@@ -326,6 +329,11 @@ public sealed class ConnectionNegotiator : IDisposable, ISignalingHandler
         return _sessions.GetOrAdd(sessionId, id =>
         {
             var transport = new PeerTransportSession(_options.Verbose);
+            transport.SetPriority(_options.Priority);
+            if (_options.RateLimitBytesPerSec > 0)
+            {
+                transport.SetRateLimit(new TokenBucket(_options.RateLimitBytesPerSec));
+            }
             transport.OnDataReceived += (data, length) =>
             {
                 OnDataReceived?.Invoke(data, length);
@@ -839,13 +847,16 @@ public sealed class ConnectionNegotiator : IDisposable, ISignalingHandler
     /// </summary>
     public NegotiatorStats GetStatsSnapshot()
     {
+        var sessionStats = GetSession(_activeSessionId).GetStatsSnapshot();
         return new NegotiatorStats(
             Mode,
             _natDetection?.NatType.ToString() ?? "Unknown",
             _publicEndPoint?.ToString(),
             IsSignalingConnected,
             _sessions.Count,
-            _options.TargetNodeId
+            _options.TargetNodeId,
+            sessionStats.RateLimitBytesPerSec,
+            sessionStats.TokenBucketUtilization
         );
     }
 }

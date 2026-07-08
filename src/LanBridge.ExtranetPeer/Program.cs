@@ -92,6 +92,9 @@ public class Program
 
     private static void ParseArguments(string[] args, ClientConfig config)
     {
+        long? pendingRateLimit = null;
+        string? pendingPriority = null;
+
         for (int i = 0; i < args.Length; i++)
         {
             switch (args[i])
@@ -152,7 +155,43 @@ public class Program
                 case "--map":
                 case "-m":
                     if (i + 1 < args.Length && TryParseMapping(args[++i], out var mapping))
+                    {
+                        if (pendingRateLimit.HasValue)
+                        {
+                            mapping.RateLimitBytesPerSec = pendingRateLimit.Value;
+                            pendingRateLimit = null;
+                        }
+                        if (pendingPriority != null)
+                        {
+                            mapping.Priority = pendingPriority;
+                            pendingPriority = null;
+                        }
                         config.Mappings.Add(mapping);
+                    }
+                    break;
+
+                case "--rate-limit":
+                    if (i + 1 < args.Length && long.TryParse(args[++i], out long rl))
+                    {
+                        if (config.Mappings.Count > 0)
+                            config.Mappings[^1].RateLimitBytesPerSec = rl;
+                        else
+                            pendingRateLimit = rl;
+                    }
+                    break;
+
+                case "--priority":
+                    if (i + 1 < args.Length)
+                    {
+                        var p = args[++i].ToLowerInvariant();
+                        if (p == "high" || p == "normal" || p == "low")
+                        {
+                            if (config.Mappings.Count > 0)
+                                config.Mappings[^1].Priority = p;
+                            else
+                                pendingPriority = p;
+                        }
+                    }
                     break;
                 
                 case "--udp-port":
@@ -266,6 +305,8 @@ public class Program
         Console.WriteLine("  --target-node, -tn <id>         Target intranet node ID (default: intranet-peer-001)");
         Console.WriteLine("  --local-port, -lp <port>        Local proxy port (default: 8554)");
         Console.WriteLine("  --map, -m <local=host:port[:proto]> Add tunnel mapping, e.g. 8554=192.168.7.230:554 or 53=8.8.8.8:53:udp");
+        Console.WriteLine("  --rate-limit <bps>              Rate limit (bytes/sec) for the most recent --map (0 = unlimited)");
+        Console.WriteLine("  --priority <high|normal|low>   QoS priority for the most recent --map (UDP defaults high, TCP normal)");
         Console.WriteLine("  --udp-port, -up <port>          UDP port for P2P (default: random)");
         Console.WriteLine("  --punch-timeout, -pt <ms>       Hole punch timeout in ms (default: 10000)");
         Console.WriteLine("  --no-relay                      Disable relay fallback");

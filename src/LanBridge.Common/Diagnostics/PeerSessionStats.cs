@@ -29,5 +29,7 @@ public sealed record NegotiatorStats(
     string? PublicEndPoint,
     bool IsSignalingConnected,
     int ActiveSessionCount,
-    string TargetNodeId
+    string TargetNodeId,
+    long RateLimitBytesPerSec,
+    double TokenBucketUtilization
 );

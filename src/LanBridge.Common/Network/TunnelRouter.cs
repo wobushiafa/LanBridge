@@ -16,6 +16,7 @@ public sealed class TunnelRouter : IDisposable
     private readonly Dictionary<int, string> _localPortToNodeId;
     private readonly string _defaultNodeId;
     private readonly PeerConnectionOptions _baseOptions;
+    private readonly IReadOnlyDictionary<string, (long RateLimitBytesPerSec, FramePriority Priority)> _nodeQos;
     private bool _started;
 
     public SharedUdpStack UdpStack => _udpStack;
@@ -25,14 +26,17 @@ public sealed class TunnelRouter : IDisposable
     /// <param name="baseOptions">Base connection options (role, node ID, signaling host/port, STUN config, etc.)</param>
     /// <param name="localPortToNodeId">Mapping from local proxy port to target node ID.</param>
     /// <param name="defaultNodeId">Fallback target node ID when a mapping doesn't specify one.</param>
+    /// <param name="nodeQos">Optional per-target-node QoS overrides (rate limit + priority). Keys are node IDs.</param>
     public TunnelRouter(
         PeerConnectionOptions baseOptions,
         Dictionary<int, string> localPortToNodeId,
-        string defaultNodeId)
+        string defaultNodeId,
+        IReadOnlyDictionary<string, (long RateLimitBytesPerSec, FramePriority Priority)>? nodeQos = null)
     {
         _baseOptions = baseOptions;
         _localPortToNodeId = localPortToNodeId;
         _defaultNodeId = defaultNodeId;
+        _nodeQos = nodeQos ?? new Dictionary<string, (long, FramePriority)>(0, StringComparer.OrdinalIgnoreCase);
 
         // Create shared infrastructure (one UDP socket, one signaling TCP connection)
         _udpStack = new SharedUdpStack(baseOptions);
@@ -98,6 +102,10 @@ public sealed class TunnelRouter : IDisposable
         // Create one ConnectionNegotiator per unique target node
         foreach (var nodeId in GetTargetNodeIds())
         {
+            var (rateLimit, priority) = _nodeQos.TryGetValue(nodeId, out var qos)
+                ? qos
+                : (0L, _baseOptions.Priority);
+
             var options = new PeerConnectionOptions
             {
                 Role = _baseOptions.Role,
@@ -115,7 +123,9 @@ public sealed class TunnelRouter : IDisposable
                 Verbose = _baseOptions.Verbose,
                 EnableKcpCongestionControl = _baseOptions.EnableKcpCongestionControl,
                 SignalingTransport = _baseOptions.SignalingTransport,
-                SignalingWsPort = _baseOptions.SignalingWsPort
+                SignalingWsPort = _baseOptions.SignalingWsPort,
+                RateLimitBytesPerSec = rateLimit,
+                Priority = priority
             };
 
             var negotiator = new ConnectionNegotiator(options, _udpStack, _signalingStack);

@@ -56,7 +56,7 @@ public class TokenBucketTests
 public class PriorityFrameQueueTests
 {
     [Fact]
-    public void HighPriority_DeqeuedBeforeNormal()
+    public void HighPriority_DequeuedBeforeNormal()
     {
         var queue = new PriorityFrameQueue();
         var normalData = new byte[] { 1 };

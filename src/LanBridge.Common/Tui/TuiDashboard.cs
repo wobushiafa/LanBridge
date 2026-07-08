@@ -82,6 +82,11 @@ public sealed class TuiDashboard : IDisposable
         sb.AppendLine($"  TRANSPORT: {modeStr}    NAT: {negotiator.NatType}");
         sb.AppendLine($"  Public: {negotiator.PublicEndPoint ?? "n/a"}    Signaling: {(negotiator.IsSignalingConnected ? "[32mConnected[0m" : "[31mDisconnected[0m")}");
         sb.AppendLine($"  Target: {negotiator.TargetNodeId}    Sessions: {negotiator.ActiveSessionCount}");
+
+        var rateStr = negotiator.RateLimitBytesPerSec > 0
+            ? $"\x1b[33m{negotiator.RateLimitBytesPerSec / 1024.0 / 1024.0:F1} MB/s\x1b[0m (util: \x1b[36m{negotiator.TokenBucketUtilization * 100:F0}%\x1b[0m)"
+            : "\x1b[32munlimited\x1b[0m";
+        sb.AppendLine($"  Rate: {rateStr}");
         sb.AppendLine();
 
         // Telemetry counters
