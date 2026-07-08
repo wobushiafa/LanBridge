@@ -24,6 +24,7 @@ public sealed class TransportOptions
     public int UdpPort { get; set; }
     public bool Verbose { get; set; }
     public bool EnableKcpCongestionControl { get; set; }
+    public bool EnableTui { get; set; }
 }
 
 public sealed class ExtranetConnectionOptions

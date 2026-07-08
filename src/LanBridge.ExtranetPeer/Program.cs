@@ -173,7 +173,12 @@ public class Program
                 case "-v":
                     config.Verbose = true;
                     break;
-                
+
+                case "--tui":
+                case "--dashboard":
+                    config.Transport.EnableTui = true;
+                    break;
+
                 case "--help":
                 case "-h":
                     PrintHelp();

@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using System.Collections.Concurrent;
+using LanBridge.Common.Diagnostics;
 using LanBridge.Common.Protocol;
 
 namespace LanBridge.Common.Network;
@@ -827,5 +828,20 @@ public sealed class ConnectionNegotiator : IDisposable, ISignalingHandler
         {
             await RequestConnectionAsync(force: true);
         }
+    }
+
+    /// <summary>
+    /// Returns a statistics snapshot for TUI dashboard or metrics export.
+    /// </summary>
+    public NegotiatorStats GetStatsSnapshot()
+    {
+        return new NegotiatorStats(
+            Mode,
+            _natDetection?.NatType.ToString() ?? "Unknown",
+            _publicEndPoint?.ToString(),
+            IsSignalingConnected,
+            _sessions.Count,
+            _options.TargetNodeId
+        );
     }
 }

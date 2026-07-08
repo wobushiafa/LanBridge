@@ -3,8 +3,10 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text.Json.Serialization;
 using LanBridge.Common.Configuration;
+using LanBridge.Common.Diagnostics;
 using LanBridge.Common.Network;
 using LanBridge.Common.Protocol;
+using LanBridge.Common.Tui;
 
 namespace LanBridge.ExtranetPeer;
 
@@ -132,6 +134,9 @@ public class ExtranetPeer : IDisposable
     // Track which local port each stream belongs to (for reverse routing)
     private readonly ConcurrentDictionary<uint, int> _streamToLocalPort = new();
 
+    // TUI dashboard (optional)
+    private TuiDashboard? _dashboard;
+
     public event Action<string>? OnStatusChanged;
     public event Action<byte[], int>? OnDataReceived;
 
@@ -220,6 +225,21 @@ public class ExtranetPeer : IDisposable
 
             await StartLocalProxyAsync();
             StartUdpSessionCleaner();
+
+            // Start TUI dashboard if enabled
+            if (_config.Transport.EnableTui)
+            {
+                var firstNegotiator = _router.Negotiators.Values.FirstOrDefault();
+                if (firstNegotiator != null)
+                {
+                    _dashboard = new TuiDashboard(
+                        _config.Identity.NodeId,
+                        "ExtranetPeer",
+                        () => firstNegotiator.GetStatsSnapshot(),
+                        () => new Dictionary<string, long>());
+                    _ = Task.Run(() => _dashboard.Run(_cts.Token), _cts.Token);
+                }
+            }
 
             while (_isRunning)
             {

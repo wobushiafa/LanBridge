@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using LanBridge.Common.Diagnostics;
 using LanBridge.Common.Protocol;
 
 namespace LanBridge.Common.Network;
@@ -308,6 +309,30 @@ public sealed class PeerTransportSession : IDisposable
         var lossHint = stats.InputErrors > 0 ? $", inputErrors={stats.InputErrors}" : "";
         var rtt = rttMs >= 0 ? $"{rttMs}ms" : "n/a";
         OnStatusChanged?.Invoke($"KCP stats: rtt={rtt}, mtu={stats.Mtu}, cwnd={stats.Cwnd}, waitSnd={stats.WaitSnd}, sent={stats.SentBytes / 1024.0:F1}KB, recv={stats.ReceivedBytes / 1024.0:F1}KB{lossHint}");
+    }
+
+    /// <summary>
+    /// Returns a statistics snapshot for TUI dashboard or metrics export.
+    /// </summary>
+    public PeerSessionStats GetStatsSnapshot()
+    {
+        lock (_lock)
+        {
+            var kcpStats = _kcpSession?.GetStats();
+            return new PeerSessionStats(
+                _mode,
+                _lastRttMs,
+                kcpStats?.Cwnd ?? 0,
+                kcpStats?.WaitSnd ?? 0,
+                kcpStats?.SentBytes ?? 0,
+                kcpStats?.ReceivedBytes ?? 0,
+                kcpStats?.SentPackets ?? 0,
+                kcpStats?.ReceivedPackets ?? 0,
+                kcpStats?.InputErrors ?? 0,
+                _tokenBucket?.Utilization ?? 0.0,
+                _tokenBucket?.RateBytesPerSec ?? 0
+            );
+        }
     }
 
     private void DisposeCurrent()
