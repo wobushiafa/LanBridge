@@ -22,6 +22,12 @@ public sealed class PeerTransportSession : IDisposable
     private long _lastRttMs = -1;
     private PeerTransportMode _mode;
 
+    // QoS / Rate limiting (optional, null = no limit, zero overhead)
+    private TokenBucket? _tokenBucket;
+    private FramePriority _priority = FramePriority.Normal;
+    private readonly PriorityFrameQueue _priorityQueue = new();
+    private readonly SemaphoreSlim _queueDrainLock = new(1, 1);
+
     public event Action<byte[], int>? OnDataReceived;
     public event Action? OnDisconnected;
     public event Action<string>? OnP2pUnhealthy;
@@ -95,6 +101,43 @@ public sealed class PeerTransportSession : IDisposable
 
     public async Task SendAsync(byte[] data, int offset, int length)
     {
+        // 1. Token bucket rate limiting (zero overhead when not configured)
+        if (_tokenBucket != null && !_tokenBucket.TryConsume(length))
+        {
+            await _tokenBucket.WaitForTokensAsync(length, CancellationToken.None);
+        }
+
+        // 2. Priority queue: only enqueue when there's already backlog
+        //    (avoids queue overhead when there's no congestion)
+        if (!_priorityQueue.IsEmpty)
+        {
+            _priorityQueue.Enqueue(data, offset, length, _priority);
+            await DrainQueueAsync();
+            return;
+        }
+
+        // 3. Direct send
+        await SendCoreAsync(data, offset, length);
+    }
+
+    /// <summary>
+    /// Set rate limiter for this session. Pass null to disable.
+    /// </summary>
+    public void SetRateLimit(TokenBucket? bucket)
+    {
+        _tokenBucket = bucket;
+    }
+
+    /// <summary>
+    /// Set QoS priority for this session.
+    /// </summary>
+    public void SetPriority(FramePriority priority)
+    {
+        _priority = priority;
+    }
+
+    private async Task SendCoreAsync(byte[] data, int offset, int length)
+    {
         KcpSession? kcp;
         RelayClient? relay;
         PeerTransportMode currentMode;
@@ -114,6 +157,22 @@ public sealed class PeerTransportSession : IDisposable
         if (relay != null && currentMode == PeerTransportMode.Relay && relay.IsConnected)
         {
             await relay.SendAsync(data, offset, length);
+        }
+    }
+
+    private async Task DrainQueueAsync()
+    {
+        await _queueDrainLock.WaitAsync();
+        try
+        {
+            while (_priorityQueue.TryDequeue(out var data, out var offset, out var length))
+            {
+                await SendCoreAsync(data, offset, length);
+            }
+        }
+        finally
+        {
+            _queueDrainLock.Release();
         }
     }
 
@@ -276,5 +335,6 @@ public sealed class PeerTransportSession : IDisposable
     public void Dispose()
     {
         DisposeCurrent();
+        _queueDrainLock.Dispose();
     }
 }

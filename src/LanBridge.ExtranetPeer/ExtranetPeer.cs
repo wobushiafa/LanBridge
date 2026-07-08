@@ -76,10 +76,34 @@ public class TunnelMapping
     /// Target node ID for multi-tunnel routing. When null, uses the default --target-node.
     /// </summary>
     public string? TargetNodeId { get; set; }
+    /// <summary>
+    /// Rate limit in bytes per second for this mapping. 0 = no limit (default).
+    /// </summary>
+    public long RateLimitBytesPerSec { get; set; }
+    /// <summary>
+    /// QoS priority: "high", "normal", or "low". Default is auto-derived from protocol
+    /// (UDP = high, TCP = normal).
+    /// </summary>
+    public string? Priority { get; set; }
 
     public string Target => string.IsNullOrWhiteSpace(TargetHost) || TargetPort <= 0
         ? string.Empty
         : new TargetDescriptor(TargetHost, TargetPort, Protocol).ToString();
+
+    /// <summary>
+    /// Resolves the effective priority: explicit Priority if set, otherwise
+    /// high for UDP, normal for TCP.
+    /// </summary>
+    public FramePriority EffectivePriority =>
+        Priority?.ToLowerInvariant() switch
+        {
+            "high" => FramePriority.High,
+            "low" => FramePriority.Low,
+            "normal" => FramePriority.Normal,
+            _ => string.Equals(Protocol, "udp", StringComparison.OrdinalIgnoreCase)
+                ? FramePriority.High
+                : FramePriority.Normal
+        };
 }
 
 public enum ConnectionState
