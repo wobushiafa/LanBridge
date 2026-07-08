@@ -22,6 +22,15 @@ public class SignalingService : IDisposable
 
     public event Action<string, BaseMessage>? OnMessageReceived;
 
+    /// <summary>
+    /// Process a message from any transport (TCP or WebSocket).
+    /// Public so WebSocketSignalingService can delegate to the same logic.
+    /// </summary>
+    public async Task ProcessMessageFromTransportAsync(string clientId, BaseMessage message)
+    {
+        await ProcessMessageAsync(clientId, message, null!);
+    }
+
     public SignalingService(ServerConfig config, OperationalTelemetry telemetry)
     {
         _config = config;

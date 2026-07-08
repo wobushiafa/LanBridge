@@ -3,27 +3,23 @@ using System.Text;
 
 namespace LanBridge.Common.Network;
 
-public class SignalingClient : IDisposable
+/// <summary>
+/// TCP-based signaling transport with 4-byte length-prefixed JSON messages.
+/// Now extends SignalingTransportBase for transport abstraction.
+/// </summary>
+public class SignalingClient : SignalingTransportBase
 {
     private TcpClient? _tcpClient;
     private NetworkStream? _stream;
     private readonly string _serverHost;
     private readonly int _serverPort;
-    private CancellationTokenSource _cts;
-    private readonly SemaphoreSlim _sendLock = new(1, 1);
-    private volatile bool _isConnected;
 
-    public event Func<string, Task>? OnMessageReceived;
-    public event Action? OnDisconnected;
-    public event Action<string>? OnError;
-
-    public bool IsConnected => _isConnected;
+    public override bool IsConnected => _tcpClient?.Connected == true && _stream != null;
 
     public SignalingClient(string host, int port)
     {
         _serverHost = host;
         _serverPort = port;
-        _cts = new CancellationTokenSource();
     }
 
     public async Task ConnectAsync()
@@ -33,36 +29,28 @@ public class SignalingClient : IDisposable
             _tcpClient = new TcpClient();
             await _tcpClient.ConnectAsync(_serverHost, _serverPort);
             _stream = _tcpClient.GetStream();
-            _isConnected = true;
+            SetConnected(true);
             _ = Task.Run(ReceiveLoopAsync);
         }
         catch (Exception ex)
         {
-            OnError?.Invoke($"Connect error: {ex.Message}");
+            HandleError($"Connect error: {ex.Message}");
             throw;
         }
     }
 
-    public async Task SendAsync(string message)
+    protected override async Task SendCoreAsync(string message, CancellationToken ct)
     {
-        if (!_isConnected || _stream == null)
+        if (_stream == null)
         {
             throw new InvalidOperationException("Not connected");
         }
 
-        await _sendLock.WaitAsync(_cts.Token);
-        try
-        {
-            var data = Encoding.UTF8.GetBytes(message);
-            var lengthBytes = BitConverter.GetBytes(data.Length);
-            await _stream.WriteAsync(lengthBytes, 0, 4);
-            await _stream.WriteAsync(data, 0, data.Length);
-            await _stream.FlushAsync();
-        }
-        finally
-        {
-            _sendLock.Release();
-        }
+        var data = Encoding.UTF8.GetBytes(message);
+        var lengthBytes = BitConverter.GetBytes(data.Length);
+        await _stream.WriteAsync(lengthBytes, 0, 4, ct);
+        await _stream.WriteAsync(data, 0, data.Length, ct);
+        await _stream.FlushAsync(ct);
     }
 
     private async Task ReceiveLoopAsync()
@@ -71,7 +59,7 @@ public class SignalingClient : IDisposable
 
         try
         {
-            while (_isConnected && _stream != null)
+            while (IsConnected && _stream != null)
             {
                 var lengthBuffer = new byte[4];
                 var bytesRead = 0;
@@ -105,30 +93,21 @@ public class SignalingClient : IDisposable
                 }
 
                 var message = Encoding.UTF8.GetString(buffer, 0, messageLength);
-                var handler = OnMessageReceived;
-                if (handler != null)
-                {
-                    await handler.Invoke(message);
-                }
+                await HandleMessageAsync(message);
             }
         }
         catch (Exception ex)
         {
-            if (_isConnected)
+            if (IsConnected)
             {
-                OnError?.Invoke($"Receive error: {ex.Message}");
-                _isConnected = false;
-                OnDisconnected?.Invoke();
+                HandleError($"Receive error: {ex.Message}");
+                HandleDisconnected();
             }
         }
     }
 
-    public void Dispose()
+    protected override void DisposeCore()
     {
-        _isConnected = false;
-        _cts.Cancel();
-        _cts.Dispose();
-        _sendLock.Dispose();
         _stream?.Dispose();
         _tcpClient?.Dispose();
     }

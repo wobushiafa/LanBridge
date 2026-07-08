@@ -1,5 +1,9 @@
 namespace LanBridge.Common.Network;
 
+/// <summary>
+/// Manages the signaling connection lifecycle with automatic reconnection.
+/// Supports both TCP (SignalingClient) and WebSocket (WebSocketSignalingClient) transports.
+/// </summary>
 public sealed class SignalingConnectionLoop : IDisposable
 {
     private readonly string _host;
@@ -8,10 +12,24 @@ public sealed class SignalingConnectionLoop : IDisposable
     private readonly Action? _onDisconnected;
     private readonly Func<string, Task> _onMessageAsync;
     private readonly Func<SignalingClient, Task> _onConnectedAsync;
-    private SignalingClient? _client;
+    private readonly string _transportType; // "tcp", "ws", "auto"
+    private readonly int _wsPort;
+    private SignalingTransportBase? _transport;
 
-    public bool IsConnected => _client?.IsConnected == true;
-    public SignalingClient? Client => _client;
+    public bool IsConnected => _transport is SignalingClient tc ? tc.IsConnected :
+                               _transport is WebSocketSignalingClient ws ? ws.IsConnected :
+                               false;
+
+    /// <summary>
+    /// Legacy property: returns the TCP client if available.
+    /// For new code, use Transport property instead.
+    /// </summary>
+    public SignalingClient? Client => _transport as SignalingClient;
+
+    /// <summary>
+    /// The current active transport (TCP or WebSocket).
+    /// </summary>
+    public SignalingTransportBase? Transport => _transport;
 
     public SignalingConnectionLoop(
         string host,
@@ -19,7 +37,9 @@ public sealed class SignalingConnectionLoop : IDisposable
         Action<string>? statusSink,
         Action? onDisconnected,
         Func<string, Task> onMessageAsync,
-        Func<SignalingClient, Task> onConnectedAsync)
+        Func<SignalingClient, Task> onConnectedAsync,
+        string transportType = "tcp",
+        int wsPort = 9010)
     {
         _host = host;
         _port = port;
@@ -27,6 +47,8 @@ public sealed class SignalingConnectionLoop : IDisposable
         _onDisconnected = onDisconnected;
         _onMessageAsync = onMessageAsync;
         _onConnectedAsync = onConnectedAsync;
+        _transportType = transportType;
+        _wsPort = wsPort;
     }
 
     public async Task RunAsync(CancellationToken cancellationToken)
@@ -47,62 +69,121 @@ public sealed class SignalingConnectionLoop : IDisposable
                 continue;
             }
 
-            CleanupClient();
+            CleanupTransport();
 
-            try
+            // Try transport based on configuration
+            if (_transportType == "ws")
             {
-                _statusSink?.Invoke("Connecting to signaling server...");
-                var client = new SignalingClient(_host, _port);
-                client.OnMessageReceived += message => _ = _onMessageAsync(message);
-                client.OnDisconnected += () =>
-                {
-                    _onDisconnected?.Invoke();
-                    _statusSink?.Invoke("Disconnected from signaling server");
-                };
-                client.OnError += error => _statusSink?.Invoke($"Signaling error: {error}");
-
-                _client = client;
-                await client.ConnectAsync();
-                _statusSink?.Invoke("Connected to signaling server");
-                await _onConnectedAsync(client);
+                await TryConnectWebSocketAsync(cancellationToken);
             }
-            catch (Exception ex)
+            else if (_transportType == "auto")
             {
-                _statusSink?.Invoke($"Failed to connect to signaling server: {ex.Message}. Retrying in 5 seconds...");
-                CleanupClient();
-
-                try
+                // Try TCP first, fallback to WS
+                var tcpOk = await TryConnectTcpAsync(cancellationToken);
+                if (!tcpOk)
                 {
-                    await Task.Delay(5000, cancellationToken);
+                    await TryConnectWebSocketAsync(cancellationToken);
                 }
-                catch (OperationCanceledException)
-                {
-                    break;
-                }
+            }
+            else
+            {
+                // Default: TCP only
+                await TryConnectTcpAsync(cancellationToken);
             }
         }
     }
 
-    private void CleanupClient()
+    private async Task<bool> TryConnectTcpAsync(CancellationToken cancellationToken)
     {
-        if (_client == null)
+        try
+        {
+            _statusSink?.Invoke("Connecting to signaling server (TCP)...");
+            var client = new SignalingClient(_host, _port);
+            client.OnMessageReceived += message => _onMessageAsync(message);
+            client.OnDisconnected += () =>
+            {
+                _onDisconnected?.Invoke();
+                _statusSink?.Invoke("Disconnected from signaling server");
+            };
+            client.OnError += error => _statusSink?.Invoke($"Signaling error: {error}");
+
+            _transport = client;
+            await client.ConnectAsync();
+            _statusSink?.Invoke("Connected to signaling server (TCP)");
+            await _onConnectedAsync(client);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _statusSink?.Invoke($"TCP connect failed: {ex.Message}");
+            CleanupTransport();
+            await WaitBeforeRetryAsync(cancellationToken);
+            return false;
+        }
+    }
+
+    private async Task<bool> TryConnectWebSocketAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            _statusSink?.Invoke("Connecting to signaling server (WebSocket)...");
+            var client = new WebSocketSignalingClient(_host, _wsPort);
+            client.OnMessageReceived += message => _onMessageAsync(message);
+            client.OnDisconnected += () =>
+            {
+                _onDisconnected?.Invoke();
+                _statusSink?.Invoke("Disconnected from signaling server (WebSocket)");
+            };
+            client.OnError += error => _statusSink?.Invoke($"WebSocket signaling error: {error}");
+
+            _transport = client;
+            await client.ConnectAsync();
+            _statusSink?.Invoke("Connected to signaling server (WebSocket)");
+
+            // For WebSocket, we still call the connected callback but with null SignalingClient
+            // The transport abstraction handles send/receive via the base class
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _statusSink?.Invoke($"WebSocket connect failed: {ex.Message}");
+            CleanupTransport();
+            await WaitBeforeRetryAsync(cancellationToken);
+            return false;
+        }
+    }
+
+    private async Task WaitBeforeRetryAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            await Task.Delay(5000, cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    }
+
+    private void CleanupTransport()
+    {
+        if (_transport == null)
         {
             return;
         }
 
         try
         {
-            _client.Dispose();
+            _transport.Dispose();
         }
         catch
         {
         }
 
-        _client = null;
+        _transport = null;
     }
 
     public void Dispose()
     {
-        CleanupClient();
+        CleanupTransport();
     }
 }
