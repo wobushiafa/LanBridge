@@ -228,7 +228,8 @@ public class Program
             LocalPort = localPort,
             TargetHost = descriptor.Host,
             TargetPort = descriptor.Port,
-            Protocol = descriptor.Protocol
+            Protocol = descriptor.Protocol,
+            TargetNodeId = descriptor.NodeId
         };
         return true;
     }

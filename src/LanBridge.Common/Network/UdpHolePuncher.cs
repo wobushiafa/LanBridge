@@ -11,7 +11,12 @@ public class UdpHolePuncher : IDisposable
 {
     private readonly UdpClient _udpClient;
     private readonly string _localId;
-    private IPEndPoint? _remoteEndPoint;
+
+    // Multi-remote support: keyed by nodeId (or address key for backward compat)
+    private readonly ConcurrentDictionary<string, IPEndPoint> _remoteEndPoints = new();
+    // Legacy single-remote accessor for backward compatibility
+    private IPEndPoint? _lastRemoteEndPoint;
+
     private readonly ConcurrentDictionary<string, byte> _punchedEndpoints = new();
     private readonly ConcurrentDictionary<uint, KcpSession> _kcpSessions = new();
     private readonly ConcurrentDictionary<string, TaskCompletionSource<byte[]>> _pendingStunRequests = new();
@@ -19,13 +24,14 @@ public class UdpHolePuncher : IDisposable
     private Task? _receivePumpTask;
 
     public event Action<IPEndPoint>? OnHolePunched;
+    public event Action<string, IPEndPoint>? OnHolePunchedWithNodeId;
     public event Action<IPEndPoint, uint>? OnLanAdvertised;
     public event Action<string>? OnError;
     public event Action<byte[], int, IPEndPoint>? OnUnreliableDataReceived;
 
     public bool IsPunched => !_punchedEndpoints.IsEmpty;
     public IPEndPoint? LocalEndPoint => _udpClient.Client.LocalEndPoint as IPEndPoint;
-    public IPEndPoint? RemoteEndPoint => _remoteEndPoint;
+    public IPEndPoint? RemoteEndPoint => _lastRemoteEndPoint;
     public UdpClient Client => _udpClient;
 
     public UdpHolePuncher(int port = 0, string localId = "")
@@ -45,6 +51,23 @@ public class UdpHolePuncher : IDisposable
         _cts = new CancellationTokenSource();
     }
 
+    /// <summary>
+    /// Register a remote endpoint for a specific target node.
+    /// Used in multi-tunnel mode to track which remote corresponds to which node.
+    /// </summary>
+    public void RegisterRemoteEndPoint(string nodeId, IPEndPoint endpoint)
+    {
+        _remoteEndPoints[nodeId] = endpoint;
+    }
+
+    /// <summary>
+    /// Get the remote endpoint for a specific target node.
+    /// </summary>
+    public IPEndPoint? GetRemoteEndPoint(string nodeId)
+    {
+        return _remoteEndPoints.TryGetValue(nodeId, out var ep) ? ep : null;
+    }
+
     public void RegisterStunRequest(byte[] transactionId, TaskCompletionSource<byte[]> tcs)
     {
         var key = Convert.ToHexString(transactionId);
@@ -57,9 +80,20 @@ public class UdpHolePuncher : IDisposable
         _pendingStunRequests.TryRemove(key, out _);
     }
 
-    public async Task StartPunchingAsync(IPEndPoint remoteEp, IPEndPoint? remoteEpV6 = null, int intervalMs = 200, int timeoutMs = 10000, bool predictPorts = false)
+    public async Task StartPunchingAsync(IPEndPoint remoteEp, IPEndPoint? remoteEpV6 = null, int intervalMs = 200, int timeoutMs = 10000, bool predictPorts = false, string? nodeId = null)
     {
-        _remoteEndPoint = remoteEpV6 ?? remoteEp;
+        _lastRemoteEndPoint = remoteEpV6 ?? remoteEp;
+
+        // Register remote endpoints for multi-tunnel routing
+        if (nodeId != null)
+        {
+            RegisterRemoteEndPoint(nodeId, remoteEp);
+            if (remoteEpV6 != null)
+            {
+                RegisterRemoteEndPoint($"{nodeId}_v6", remoteEpV6);
+            }
+        }
+
         StartReceivePump();
         var startTime = DateTime.UtcNow;
         var remoteKey = NormalizeEndPoint(remoteEp).ToString();
@@ -282,8 +316,12 @@ public class UdpHolePuncher : IDisposable
 
         if (message.StartsWith("PUNCH:"))
         {
-            _remoteEndPoint = result.RemoteEndPoint;
-            MarkPunched(result.RemoteEndPoint);
+            // PUNCH:peerId:ticks — extract peerId for multi-tunnel routing
+            var colonIndex = message.IndexOf(':', 6);
+            var peerId = colonIndex > 6 ? message[6..colonIndex] : _localId;
+
+            _lastRemoteEndPoint = result.RemoteEndPoint;
+            MarkPunched(result.RemoteEndPoint, peerId);
 
             var ackData = Encoding.UTF8.GetBytes($"PUNCH_ACK:{_localId}");
             await _udpClient.SendAsync(ackData, ackData.Length, result.RemoteEndPoint);
@@ -292,15 +330,23 @@ public class UdpHolePuncher : IDisposable
 
         if (message.StartsWith("PUNCH_ACK:"))
         {
-            MarkPunched(result.RemoteEndPoint);
+            // PUNCH_ACK:peerId — extract peerId
+            var peerId = message["PUNCH_ACK:".Length..];
+
+            _lastRemoteEndPoint = result.RemoteEndPoint;
+            MarkPunched(result.RemoteEndPoint, peerId);
         }
     }
 
-    private void MarkPunched(IPEndPoint remoteEndPoint)
+    private void MarkPunched(IPEndPoint remoteEndPoint, string? peerId = null)
     {
         if (_punchedEndpoints.TryAdd(NormalizeEndPoint(remoteEndPoint).ToString(), 0))
         {
             OnHolePunched?.Invoke(remoteEndPoint);
+            if (peerId != null)
+            {
+                OnHolePunchedWithNodeId?.Invoke(peerId, remoteEndPoint);
+            }
         }
     }
 
@@ -321,13 +367,13 @@ public class UdpHolePuncher : IDisposable
 
     public void TriggerHolePunched(IPEndPoint remoteEndPoint, uint conv)
     {
-        _remoteEndPoint = remoteEndPoint;
+        _lastRemoteEndPoint = remoteEndPoint;
         MarkPunched(remoteEndPoint);
     }
 
     public async Task SendAsync(byte[] data)
     {
-        var ep = _remoteEndPoint;
+        var ep = _lastRemoteEndPoint;
         if (ep == null)
         {
             throw new InvalidOperationException("Remote endpoint not set");

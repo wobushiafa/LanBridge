@@ -46,7 +46,6 @@ public class ClientConfig
     public void Validate()
     {
         ConfigValidation.EnsureNodeId(Identity.NodeId, nameof(Identity.NodeId));
-        ConfigValidation.EnsureNodeId(Connection.TargetNodeId, nameof(Connection.TargetNodeId));
         ConfigValidation.EnsureHost(Signaling.Host, nameof(Signaling.Host));
         ConfigValidation.EnsureHost(Stun.Host, nameof(Stun.Host));
         ConfigValidation.EnsurePort(Signaling.Port, nameof(Signaling.Port));
@@ -73,6 +72,10 @@ public class TunnelMapping
     public string TargetHost { get; set; } = string.Empty;
     public int TargetPort { get; set; }
     public string Protocol { get; set; } = "tcp";
+    /// <summary>
+    /// Target node ID for multi-tunnel routing. When null, uses the default --target-node.
+    /// </summary>
+    public string? TargetNodeId { get; set; }
 
     public string Target => string.IsNullOrWhiteSpace(TargetHost) || TargetPort <= 0
         ? string.Empty
@@ -92,7 +95,7 @@ public enum ConnectionState
 public class ExtranetPeer : IDisposable
 {
     private readonly ClientConfig _config;
-    private readonly ConnectionNegotiator _connection;
+    private readonly TunnelRouter _router;
     private readonly List<TcpListener> _localProxies = new();
     private readonly ConcurrentDictionary<uint, TcpClient> _localClients = new();
     private readonly List<UdpClient> _localUdpProxies = new();
@@ -102,11 +105,25 @@ public class ExtranetPeer : IDisposable
     private bool _isRunning;
     private ConnectionState _state = ConnectionState.Disconnected;
 
+    // Track which local port each stream belongs to (for reverse routing)
+    private readonly ConcurrentDictionary<uint, int> _streamToLocalPort = new();
+
     public event Action<string>? OnStatusChanged;
     public event Action<byte[], int>? OnDataReceived;
 
     public ConnectionState State => _state;
-    public bool IsConnected => _connection.IsConnected;
+    public bool IsConnected
+    {
+        get
+        {
+            // Connected if any negotiator is connected
+            foreach (var negotiator in _router.Negotiators.Values)
+            {
+                if (negotiator.IsConnected) return true;
+            }
+            return false;
+        }
+    }
 
     private sealed class UdpSession
     {
@@ -125,7 +142,19 @@ public class ExtranetPeer : IDisposable
             _config.Mappings.Add(new TunnelMapping { LocalPort = _config.LocalProxyPort });
         }
 
-        _connection = new ConnectionNegotiator(new PeerConnectionOptions
+        // Build localPort → nodeId routing table
+        var routingTable = new Dictionary<int, string>();
+        foreach (var mapping in _config.Mappings)
+        {
+            var nodeId = mapping.TargetNodeId ?? _config.Connection.TargetNodeId;
+            if (string.IsNullOrWhiteSpace(nodeId))
+            {
+                throw new InvalidOperationException($"Mapping for local port {mapping.LocalPort} has no target node ID and no default --target-node is set.");
+            }
+            routingTable[mapping.LocalPort] = nodeId;
+        }
+
+        var baseOptions = new PeerConnectionOptions
         {
             Role = PeerConnectionRole.Extranet,
             NodeId = _config.Identity.NodeId,
@@ -134,17 +163,16 @@ public class ExtranetPeer : IDisposable
             StunServerHost = _config.Stun.Host,
             StunServerPort = _config.Stun.Port,
             StunAlternateServerPort = _config.Stun.AlternatePort,
-            TargetNodeId = _config.Connection.TargetNodeId,
+            Token = _config.Identity.Token,
             UdpPort = _config.Transport.UdpPort,
+            TargetNodeId = _config.Connection.TargetNodeId,
             HolePunchTimeoutMs = _config.Connection.HolePunchTimeoutMs,
             EnableRelayFallback = _config.Connection.EnableRelayFallback,
             Verbose = _config.Transport.Verbose,
             EnableKcpCongestionControl = _config.Transport.EnableKcpCongestionControl
-        });
-        _connection.OnStatusChanged += HandleConnectionStatus;
-        _connection.OnModeChanged += HandleTransportModeChanged;
-        _connection.OnSignalingDisconnected += () => UpdateState(ConnectionState.Disconnected);
-        _connection.OnDataReceived += HandleTunnelData;
+        };
+
+        _router = new TunnelRouter(baseOptions, routingTable, _config.Connection.TargetNodeId);
     }
 
     public async Task StartAsync()
@@ -154,7 +182,18 @@ public class ExtranetPeer : IDisposable
 
         try
         {
-            await _connection.StartAsync();
+            await _router.StartAsync(_cts.Token);
+
+            // Subscribe to all negotiator events
+            foreach (var (nodeId, negotiator) in _router.Negotiators)
+            {
+                negotiator.OnStatusChanged += HandleConnectionStatus;
+                negotiator.OnModeChanged += HandleTransportModeChanged;
+                negotiator.OnSignalingDisconnected += () => UpdateState(ConnectionState.Disconnected);
+                negotiator.OnDataReceived += HandleTunnelData;
+                negotiator.OnSessionDataReceived += (sid, data, len) => HandleTunnelData(data, len);
+            }
+
             await StartLocalProxyAsync();
             StartUdpSessionCleaner();
 
@@ -219,8 +258,9 @@ public class ExtranetPeer : IDisposable
                     var listener = new TcpListener(IPAddress.Loopback, mapping.LocalPort);
                     listener.Start();
                     _localProxies.Add(listener);
-                    OnStatusChanged?.Invoke($"Local TCP proxy started on 127.0.0.1:{mapping.LocalPort}" +
-                                            (string.IsNullOrWhiteSpace(mapping.Target) ? " -> intranet default target" : $" -> {mapping.Target}"));
+                    var nodeId = mapping.TargetNodeId ?? _config.Connection.TargetNodeId;
+                    var targetDisplay = string.IsNullOrWhiteSpace(mapping.Target) ? "intranet default target" : mapping.Target;
+                    OnStatusChanged?.Invoke($"Local TCP proxy started on 127.0.0.1:{mapping.LocalPort} -> {targetDisplay}@{nodeId}");
                     _ = Task.Run(() => AcceptLocalClientsAsync(listener, mapping));
                 }
                 catch (SocketException ex) when (mapping.LocalPort == 1554)
@@ -244,8 +284,9 @@ public class ExtranetPeer : IDisposable
             var localEp = new IPEndPoint(IPAddress.Loopback, mapping.LocalPort);
             var udpClient = new UdpClient(localEp);
             _localUdpProxies.Add(udpClient);
-            OnStatusChanged?.Invoke($"Local UDP proxy started on 127.0.0.1:{mapping.LocalPort}" +
-                                    (string.IsNullOrWhiteSpace(mapping.Target) ? " -> intranet default target" : $" -> {mapping.Target}"));
+            var nodeId = mapping.TargetNodeId ?? _config.Connection.TargetNodeId;
+            var targetDisplay = string.IsNullOrWhiteSpace(mapping.Target) ? "intranet default target" : mapping.Target;
+            OnStatusChanged?.Invoke($"Local UDP proxy started on 127.0.0.1:{mapping.LocalPort} -> {targetDisplay}@{nodeId}");
             _ = Task.Run(() => ReceiveLocalUdpPacketsAsync(udpClient, mapping));
         }
         catch (Exception ex)
@@ -280,17 +321,20 @@ public class ExtranetPeer : IDisposable
                     if (_udpSessions.TryAdd(streamId, session))
                     {
                         _udpClientSessions[sessionKey] = session;
+                        _streamToLocalPort[streamId] = mapping.LocalPort;
                         OnStatusChanged?.Invoke($"New UDP virtual session: stream {streamId} for {clientEp} on port {mapping.LocalPort}");
 
-                        if (!await _connection.EnsureConnectedAsync(TimeSpan.FromSeconds(15), _cts.Token))
+                        var negotiator = _router.GetNegotiatorForLocalPort(mapping.LocalPort);
+                        if (negotiator == null || !await negotiator.EnsureConnectedAsync(TimeSpan.FromSeconds(15), _cts.Token))
                         {
                             OnStatusChanged?.Invoke($"UDP stream {streamId} closed: remote session not ready");
                             _udpSessions.TryRemove(streamId, out _);
                             _udpClientSessions.TryRemove(sessionKey, out _);
+                            _streamToLocalPort.TryRemove(streamId, out _);
                             continue;
                         }
 
-                        await SendTunnelFrameToRemoteAsync(TunnelFrame.Open(streamId, mapping.Target));
+                        await SendTunnelFrameToRemoteAsync(mapping.LocalPort, TunnelFrame.Open(streamId, mapping.Target));
                     }
                     else
                     {
@@ -305,7 +349,7 @@ public class ExtranetPeer : IDisposable
                 {
                     TunnelFrame.WriteHeader(sendBuffer, 0, TunnelFrameType.UnreliableData, session.StreamId, payloadLength);
                     Buffer.BlockCopy(data, 0, sendBuffer, 16, payloadLength);
-                    await SendUnreliableToRemoteAsync(sendBuffer, 0, 16 + payloadLength);
+                    await SendUnreliableToRemoteAsync(mapping.LocalPort, sendBuffer, 0, 16 + payloadLength);
                 }
                 finally
                 {
@@ -343,8 +387,9 @@ public class ExtranetPeer : IDisposable
                         if (_udpSessions.TryRemove(streamId, out _))
                         {
                             _udpClientSessions.TryRemove((session.LocalPort, session.ClientEndPoint), out _);
+                            _streamToLocalPort.TryRemove(streamId, out _);
                             OnStatusChanged?.Invoke($"UDP virtual session idle timeout: stream {streamId}");
-                            _ = CloseRemoteTargetAsync(streamId);
+                            _ = CloseRemoteTargetAsync(session.LocalPort, streamId);
                         }
                     }
                 }
@@ -362,6 +407,7 @@ public class ExtranetPeer : IDisposable
                 var streamId = NextStreamId();
 
                 _localClients[streamId] = client;
+                _streamToLocalPort[streamId] = mapping.LocalPort;
                 OnStatusChanged?.Invoke($"Local client connected: stream {streamId}");
 
                 _ = Task.Run(() => HandleLocalClientAsync(streamId, client, mapping));
@@ -384,13 +430,14 @@ public class ExtranetPeer : IDisposable
         try
         {
             var stream = client.GetStream();
-            if (!await _connection.EnsureConnectedAsync(TimeSpan.FromSeconds(15), _cts.Token))
+            var negotiator = _router.GetNegotiatorForLocalPort(mapping.LocalPort);
+            if (negotiator == null || !await negotiator.EnsureConnectedAsync(TimeSpan.FromSeconds(15), _cts.Token))
             {
                 OnStatusChanged?.Invoke($"Local client stream {streamId} closed: remote session not ready");
                 return;
             }
 
-            await SendTunnelFrameToRemoteAsync(TunnelFrame.Open(streamId, mapping.Target));
+            await SendTunnelFrameToRemoteAsync(mapping.LocalPort, TunnelFrame.Open(streamId, mapping.Target));
 
             while (client.Connected && _isRunning)
             {
@@ -401,7 +448,7 @@ public class ExtranetPeer : IDisposable
                 }
 
                 TunnelFrame.WriteHeader(buffer, 0, TunnelFrameType.Data, streamId, bytesRead);
-                await SendToRemoteAsync(buffer, 0, 16 + bytesRead);
+                await SendToRemoteAsync(mapping.LocalPort, buffer, 0, 16 + bytesRead);
             }
         }
         catch (OperationCanceledException)
@@ -418,17 +465,19 @@ public class ExtranetPeer : IDisposable
         {
             System.Buffers.ArrayPool<byte>.Shared.Return(buffer);
             _localClients.TryRemove(streamId, out _);
+            _streamToLocalPort.TryRemove(streamId, out _);
             client.Dispose();
             OnStatusChanged?.Invoke($"Local client disconnected: stream {streamId}");
-            await CloseRemoteTargetAsync(streamId);
+            var localPort = mapping.LocalPort;
+            await CloseRemoteTargetAsync(localPort, streamId);
         }
     }
 
-    private async Task CloseRemoteTargetAsync(uint streamId)
+    private async Task CloseRemoteTargetAsync(int localPort, uint streamId)
     {
         try
         {
-            await SendTunnelFrameToRemoteAsync(TunnelFrame.Close(streamId));
+            await SendTunnelFrameToRemoteAsync(localPort, TunnelFrame.Close(streamId));
             OnStatusChanged?.Invoke($"Requested remote target close for stream {streamId}");
         }
         catch (Exception ex)
@@ -488,10 +537,12 @@ public class ExtranetPeer : IDisposable
             if (_udpSessions.TryRemove(frame.StreamId, out var udpSession))
             {
                 _udpClientSessions.TryRemove((udpSession.LocalPort, udpSession.ClientEndPoint), out _);
+                _streamToLocalPort.TryRemove(frame.StreamId, out _);
                 OnStatusChanged?.Invoke($"UDP virtual session closed by remote: stream {frame.StreamId}");
             }
             else if (_localClients.TryRemove(frame.StreamId, out var closeClient))
             {
+                _streamToLocalPort.TryRemove(frame.StreamId, out _);
                 closeClient.Dispose();
             }
         }
@@ -501,28 +552,45 @@ public class ExtranetPeer : IDisposable
             if (_udpSessions.TryRemove(frame.StreamId, out var udpSession))
             {
                 _udpClientSessions.TryRemove((udpSession.LocalPort, udpSession.ClientEndPoint), out _);
+                _streamToLocalPort.TryRemove(frame.StreamId, out _);
             }
             else if (_localClients.TryRemove(frame.StreamId, out var errorClient))
             {
+                _streamToLocalPort.TryRemove(frame.StreamId, out _);
                 errorClient.Dispose();
             }
         }
     }
 
-    private async Task SendTunnelFrameToRemoteAsync(TunnelFrame frame)
+    // ─── Routing-aware send helpers ───
+
+    private async Task SendTunnelFrameToRemoteAsync(int localPort, TunnelFrame frame)
     {
         var bytes = frame.Encode();
-        await SendToRemoteAsync(bytes, 0, bytes.Length);
+        await SendToRemoteAsync(localPort, bytes, 0, bytes.Length);
     }
 
+    public async Task SendToRemoteAsync(int localPort, byte[] data, int offset, int length)
+    {
+        await _router.SendToRemoteAsync(localPort, data, offset, length);
+    }
+
+    public async Task SendUnreliableToRemoteAsync(int localPort, byte[] data, int offset, int length)
+    {
+        await _router.SendUnreliableToRemoteAsync(localPort, data, offset, length);
+    }
+
+    // Backward-compatible overloads (use default target node)
     public async Task SendToRemoteAsync(byte[] data, int offset, int length)
     {
-        await _connection.SendAsync(data, offset, length);
+        var defaultPort = _config.Mappings.FirstOrDefault()?.LocalPort ?? _config.LocalProxyPort;
+        await SendToRemoteAsync(defaultPort, data, offset, length);
     }
 
     public async Task SendUnreliableToRemoteAsync(byte[] data, int offset, int length)
     {
-        await _connection.SendUnreliableAsync(data, offset, length);
+        var defaultPort = _config.Mappings.FirstOrDefault()?.LocalPort ?? _config.LocalProxyPort;
+        await SendUnreliableToRemoteAsync(defaultPort, data, offset, length);
     }
 
     private void UpdateState(ConnectionState newState)
@@ -536,7 +604,7 @@ public class ExtranetPeer : IDisposable
         _isRunning = false;
         _cts.Cancel();
         _cts.Dispose();
-        _connection.Dispose();
+        _router.Dispose();
 
         foreach (var proxy in _localProxies)
         {
@@ -557,5 +625,6 @@ public class ExtranetPeer : IDisposable
         _localUdpProxies.Clear();
         _udpSessions.Clear();
         _udpClientSessions.Clear();
+        _streamToLocalPort.Clear();
     }
 }

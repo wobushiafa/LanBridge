@@ -2,7 +2,13 @@ namespace LanBridge.Common.Protocol;
 
 public readonly record struct TargetDescriptor(string Host, int Port, string Protocol)
 {
-    public override string ToString() => $"{Host}:{Port}:{Protocol}";
+    public string? NodeId { get; init; }
+
+    public override string ToString()
+    {
+        var baseStr = $"{Host}:{Port}:{Protocol}";
+        return NodeId != null ? $"{baseStr}@{NodeId}" : baseStr;
+    }
 }
 
 public static class TargetDescriptorParser
@@ -15,7 +21,21 @@ public static class TargetDescriptorParser
             return false;
         }
 
-        var parts = value.Split(':');
+        // Extract @nodeId suffix if present
+        string? nodeId = null;
+        var atIndex = value.LastIndexOf('@');
+        string targetPart;
+        if (atIndex > 0 && atIndex < value.Length - 1)
+        {
+            nodeId = value[(atIndex + 1)..];
+            targetPart = value[..atIndex];
+        }
+        else
+        {
+            targetPart = value;
+        }
+
+        var parts = targetPart.Split(':');
         if (parts.Length < 2)
         {
             return false;
@@ -52,7 +72,7 @@ public static class TargetDescriptorParser
             return false;
         }
 
-        descriptor = new TargetDescriptor(host, port, protocol);
+        descriptor = new TargetDescriptor(host, port, protocol) { NodeId = nodeId };
         return true;
     }
 }

@@ -86,6 +86,44 @@ public class ProtocolTests
     }
 
     [Fact]
+    public void TargetDescriptorParser_ParsesWithNodeId()
+    {
+        var parsed = TargetDescriptorParser.TryParse("192.168.1.10:554:tcp@intranet-peer-001", out var descriptor);
+
+        Assert.True(parsed);
+        Assert.Equal("192.168.1.10", descriptor.Host);
+        Assert.Equal(554, descriptor.Port);
+        Assert.Equal("tcp", descriptor.Protocol);
+        Assert.Equal("intranet-peer-001", descriptor.NodeId);
+    }
+
+    [Fact]
+    public void TargetDescriptorParser_ParsesWithoutNodeId()
+    {
+        var parsed = TargetDescriptorParser.TryParse("192.168.1.10:554:tcp", out var descriptor);
+
+        Assert.True(parsed);
+        Assert.Equal("192.168.1.10", descriptor.Host);
+        Assert.Equal(554, descriptor.Port);
+        Assert.Equal("tcp", descriptor.Protocol);
+        Assert.Null(descriptor.NodeId);
+    }
+
+    [Fact]
+    public void TargetDescriptor_ToString_IncludesNodeId()
+    {
+        var descriptor = new TargetDescriptor("192.168.1.10", 554, "tcp") { NodeId = "peer-001" };
+        Assert.Equal("192.168.1.10:554:tcp@peer-001", descriptor.ToString());
+    }
+
+    [Fact]
+    public void TargetDescriptor_ToString_NoNodeId()
+    {
+        var descriptor = new TargetDescriptor("192.168.1.10", 554, "tcp");
+        Assert.Equal("192.168.1.10:554:tcp", descriptor.ToString());
+    }
+
+    [Fact]
     public void P2pFailureExplainer_UsesSymmetricNatMessage()
     {
         var detection = new NatDetectionResult(

@@ -30,17 +30,26 @@ public sealed class PeerConnectionOptions
     public bool EnableKcpCongestionControl { get; init; } = false;
 }
 
-public sealed class ConnectionNegotiator : IDisposable
+public sealed class ConnectionNegotiator : IDisposable, ISignalingHandler
 {
     private readonly PeerConnectionOptions _options;
     private readonly PeerNatDiagnostics _natDiagnostics;
-    private readonly SignalingMessageRouter _signalingMessageRouter;
     private readonly ConcurrentDictionary<string, PeerTransportSession> _sessions = new();
     private readonly ConcurrentDictionary<string, PendingPunch> _pendingPunches = new();
     private readonly SemaphoreSlim _connectionRequestLock = new(1, 1);
+    private readonly CancellationTokenSource _cts = new();
+
+    // Shared infrastructure (injected for multi-tunnel, or self-owned for standalone)
+    private readonly SharedUdpStack? _injectedUdpStack;
+    private readonly SharedSignalingStack? _injectedSignalingStack;
+    private readonly bool _ownsSharedStacks;
+
+    // Self-owned instances for standalone mode
+    private readonly SignalingMessageRouter? _standaloneRouter;
     private readonly SignalingConnectionLoop _signalingConnectionLoop;
     private UdpHolePuncher? _holePuncher;
     private LanDiscoveryService? _lanDiscovery;
+
     private IPEndPoint? _publicEndPoint;
     private IPEndPoint? _publicEndPointV6;
     private NatDetectionResult? _natDetection;
@@ -48,7 +57,6 @@ public sealed class ConnectionNegotiator : IDisposable
     private volatile bool _isHolePunching;
     private string _activeSessionId = "default";
     private DateTime _lastConnectionRequestUtc = DateTime.MinValue;
-    private readonly CancellationTokenSource _cts = new();
     private bool _isNatKeepAliveRunning;
 
     public event Action<string>? OnStatusChanged;
@@ -61,24 +69,54 @@ public sealed class ConnectionNegotiator : IDisposable
     public PeerTransportMode Mode => GetSession(_activeSessionId).Mode;
     public bool IsConnected => GetSession(_activeSessionId).IsConnected;
     public bool IsSignalingConnected => _signalingConnectionLoop.IsConnected;
+    public string TargetNodeId => _options.TargetNodeId;
 
+    /// <summary>
+    /// Standalone constructor — creates and owns all infrastructure internally.
+    /// Used by IntranetPeer and single-target ExtranetPeer.
+    /// </summary>
     public ConnectionNegotiator(PeerConnectionOptions options)
     {
         _options = options;
         _natDiagnostics = new PeerNatDiagnostics(options, status => OnStatusChanged?.Invoke(status));
-        _signalingMessageRouter = new SignalingMessageRouter(
+        _ownsSharedStacks = true;
+
+        _standaloneRouter = new SignalingMessageRouter(
             status => OnStatusChanged?.Invoke(status),
             HandleConnectReadyAsync,
             HandleHolePunchStartAsync,
             HandleRelayAcceptAsync,
-            HandleErrorAsync);
+            ProcessErrorAsync);
+
         _signalingConnectionLoop = new SignalingConnectionLoop(
             _options.SignalingServerHost,
             _options.SignalingServerPort,
             status => OnStatusChanged?.Invoke(status),
             () => OnSignalingDisconnected?.Invoke(),
-            message => _signalingMessageRouter.DispatchAsync(message),
+            message => _standaloneRouter.DispatchAsync(message),
             HandleSignalingConnectedAsync);
+    }
+
+    /// <summary>
+    /// Shared-stack constructor — injects shared UDP and signaling infrastructure.
+    /// Used by multi-tunnel ExtranetPeer (via TunnelRouter).
+    /// </summary>
+    public ConnectionNegotiator(
+        PeerConnectionOptions options,
+        SharedUdpStack udpStack,
+        SharedSignalingStack signalingStack)
+    {
+        _options = options;
+        _natDiagnostics = new PeerNatDiagnostics(options, status => OnStatusChanged?.Invoke(status));
+        _injectedUdpStack = udpStack;
+        _injectedSignalingStack = signalingStack;
+        _ownsSharedStacks = false;
+
+        // Use the shared signaling stack's connection loop and dispatcher
+        _signalingConnectionLoop = signalingStack.ConnectionLoop;
+
+        // Register ourselves as a handler for our target node and sessions
+        signalingStack.Dispatcher.RegisterNode(_options.TargetNodeId, this);
     }
 
     private sealed record PendingPunch(string SessionId, uint Conv);
@@ -100,44 +138,90 @@ public sealed class ConnectionNegotiator : IDisposable
     public async Task HandleLanDiscoveryRequestAsync(IPEndPoint clientEndPoint, uint conv)
     {
         var sessionId = _activeSessionId;
-        
+
         // Register the client in pending punches so it gets picked up by MarkPunched
         _pendingPunches[GetAddressKey(clientEndPoint.Address)] = new PendingPunch(sessionId, conv);
-        
-        if (_holePuncher != null)
+
+        var puncher = GetHolePuncher();
+        if (puncher != null)
         {
             OnStatusChanged?.Invoke($"[LAN Discovery] Received local query from {clientEndPoint}. Replying advertisement & establishing direct KCP session...");
-            
+
             // Reply with unicast advertisement containing target server port
-            var serverPort = _holePuncher.LocalEndPoint?.Port ?? 0;
+            var serverPort = puncher.LocalEndPoint?.Port ?? 0;
             var advertiseMessage = $"LB_ADVERTISE:{_options.NodeId}:{serverPort}:{conv}";
             var data = Encoding.UTF8.GetBytes(advertiseMessage);
-            await _holePuncher.SendAsync(data, data.Length, clientEndPoint);
-            
+            await puncher.SendAsync(data, data.Length, clientEndPoint);
+
             // Directly trigger punch completion!
-            _holePuncher.TriggerHolePunched(clientEndPoint, conv);
+            puncher.TriggerHolePunched(clientEndPoint, conv);
         }
     }
 
     public async Task StartAsync()
     {
-        _holePuncher = new UdpHolePuncher(_options.UdpPort, _options.NodeId);
-        ConfigureHolePuncherEvents();
-
-        // Start LAN Discovery Service to scan and respond to local subnets
-        _lanDiscovery = new LanDiscoveryService(_options.NodeId, this, _options.Verbose);
-        _lanDiscovery.Start();
-
-        if (_options.Role == PeerConnectionRole.Extranet)
+        if (_injectedUdpStack != null)
         {
-            StartLanDiscoveryBroadcast();
+            // Shared-stack mode: use injected UdpHolePuncher and NAT detection
+            _holePuncher = _injectedUdpStack.HolePuncher;
+            _publicEndPoint = _injectedUdpStack.PublicEndPoint;
+            _publicEndPointV6 = _injectedUdpStack.PublicEndPointV6;
+            _natDetection = _injectedUdpStack.NatDetection;
+
+            // If NAT detection hasn't been done yet, do it now (shared across all negotiators)
+            await _injectedUdpStack.DetectNatAsync();
+            _publicEndPoint = _injectedUdpStack.PublicEndPoint;
+            _publicEndPointV6 = _injectedUdpStack.PublicEndPointV6;
+            _natDetection = _injectedUdpStack.NatDetection;
+
+            ConfigureHolePuncherEvents();
+
+            // Start LAN discovery (only once, managed by SharedUdpStack)
+            if (_options.Role == PeerConnectionRole.Intranet || _options.Role == PeerConnectionRole.Extranet)
+            {
+                _injectedUdpStack.StartLanDiscovery(this);
+            }
+
+            if (_options.Role == PeerConnectionRole.Extranet)
+            {
+                StartLanDiscoveryBroadcast();
+            }
+
+            // The shared signaling loop is already running, so just trigger our connection request
+            if (_options.Role == PeerConnectionRole.Extranet)
+            {
+                await RequestConnectionAsync(force: true);
+            }
+            else
+            {
+                await RegisterNodeAsync();
+                OnStatusChanged?.Invoke("Ready");
+                StartNatKeepAliveLoop();
+            }
         }
+        else
+        {
+            // Standalone mode: create and own all infrastructure
+            _holePuncher = new UdpHolePuncher(_options.UdpPort, _options.NodeId);
+            ConfigureHolePuncherEvents();
 
-        await DetectNatAsync();
+            // Start LAN Discovery Service to scan and respond to local subnets
+            _lanDiscovery = new LanDiscoveryService(_options.NodeId, this, _options.Verbose);
+            _lanDiscovery.Start();
 
-        // Start signaling connection manager loop in background
-        _ = Task.Run(() => _signalingConnectionLoop.RunAsync(_cts.Token), _cts.Token);
+            if (_options.Role == PeerConnectionRole.Extranet)
+            {
+                StartLanDiscoveryBroadcast();
+            }
+
+            await DetectNatAsync();
+
+            // Start signaling connection manager loop in background
+            _ = Task.Run(() => _signalingConnectionLoop.RunAsync(_cts.Token), _cts.Token);
+        }
     }
+
+    private UdpHolePuncher? GetHolePuncher() => _holePuncher;
 
     private void StartNatKeepAliveLoop()
     {
@@ -212,11 +296,12 @@ public sealed class ConnectionNegotiator : IDisposable
     public async Task SendUnreliableAsync(string sessionId, byte[] data, int offset, int length)
     {
         var session = GetSession(sessionId);
-        if (session.Mode == PeerTransportMode.P2pDirect && _holePuncher?.RemoteEndPoint != null)
+        var puncher = GetHolePuncher();
+        if (session.Mode == PeerTransportMode.P2pDirect && puncher?.RemoteEndPoint != null)
         {
             try
             {
-                await _holePuncher.Client.SendAsync(new ReadOnlyMemory<byte>(data, offset, length), _holePuncher.RemoteEndPoint);
+                await puncher.Client.SendAsync(new ReadOnlyMemory<byte>(data, offset, length), puncher.RemoteEndPoint);
                 return;
             }
             catch (Exception ex)
@@ -267,7 +352,8 @@ public sealed class ConnectionNegotiator : IDisposable
             return;
         }
 
-        if (_signalingConnectionLoop.Client?.IsConnected != true)
+        var client = _signalingConnectionLoop.Client;
+        if (client?.IsConnected != true)
         {
             return;
         }
@@ -288,7 +374,7 @@ public sealed class ConnectionNegotiator : IDisposable
                 NatType = _natDetection?.NatType ?? StunNatType.Unknown
             };
 
-            await _signalingConnectionLoop.Client.SendAsync(MessageSerializer.SerializeToString(request));
+            await client.SendAsync(MessageSerializer.SerializeToString(request));
             _lastConnectionRequestUtc = DateTime.UtcNow;
             OnStatusChanged?.Invoke($"Connection requested to {_options.TargetNodeId}");
         }
@@ -308,6 +394,12 @@ public sealed class ConnectionNegotiator : IDisposable
 
     private async Task RegisterNodeAsync()
     {
+        var client = _signalingConnectionLoop.Client;
+        if (client == null)
+        {
+            return;
+        }
+
         var register = new RegisterMessage
         {
             NodeId = _options.NodeId,
@@ -317,10 +409,18 @@ public sealed class ConnectionNegotiator : IDisposable
             NatType = _natDetection?.NatType ?? StunNatType.Unknown
         };
 
-        await _signalingConnectionLoop.Client!.SendAsync(MessageSerializer.SerializeToString(register));
+        await client.SendAsync(MessageSerializer.SerializeToString(register));
     }
 
-    private async Task HandleConnectReadyAsync(ConnectReady message)
+    // ─── ISignalingHandler implementation ───
+
+    public Task HandleRegisterAckAsync(RegisterAck ack)
+    {
+        // Registration acks are logged by the dispatcher already
+        return Task.CompletedTask;
+    }
+
+    public async Task HandleConnectReadyAsync(ConnectReady message)
     {
         if (IsConnected)
         {
@@ -329,6 +429,12 @@ public sealed class ConnectionNegotiator : IDisposable
 
         var sessionId = string.IsNullOrWhiteSpace(message.SessionId) ? _activeSessionId : message.SessionId;
         _activeSessionId = sessionId;
+
+        // Register this session with the dispatcher so future messages for this session route to us
+        if (_injectedSignalingStack != null)
+        {
+            _injectedSignalingStack.Dispatcher.RegisterSession(sessionId, this);
+        }
 
         await BeginHolePunchFromSignalAsync(
             sessionId,
@@ -339,7 +445,7 @@ public sealed class ConnectionNegotiator : IDisposable
             $"Connection ready. Starting hole punch to {{0}}");
     }
 
-    private async Task HandleHolePunchStartAsync(HolePunchStart message)
+    public async Task HandleHolePunchStartAsync(HolePunchStart message)
     {
         if (IsConnected)
         {
@@ -347,6 +453,12 @@ public sealed class ConnectionNegotiator : IDisposable
         }
 
         var sessionId = string.IsNullOrWhiteSpace(message.SessionId) ? Guid.NewGuid().ToString("N")[..8] : message.SessionId;
+
+        // Register this session with the dispatcher
+        if (_injectedSignalingStack != null)
+        {
+            _injectedSignalingStack.Dispatcher.RegisterSession(sessionId, this);
+        }
 
         await BeginHolePunchFromSignalAsync(
             sessionId,
@@ -357,6 +469,43 @@ public sealed class ConnectionNegotiator : IDisposable
             $"Hole punch request to {{0}}");
     }
 
+    public async Task HandleRelayAcceptAsync(RelayAccept message)
+    {
+        OnStatusChanged?.Invoke($"Relay accepted. Session: {message.SessionId}");
+        var sessionId = string.IsNullOrWhiteSpace(message.SessionId) ? _activeSessionId : message.SessionId;
+        _activeSessionId = sessionId;
+
+        // Register this session with the dispatcher
+        if (_injectedSignalingStack != null)
+        {
+            _injectedSignalingStack.Dispatcher.RegisterSession(sessionId, this);
+        }
+
+        var relayClient = new RelayClient();
+        await relayClient.ConnectAsync(_options.SignalingServerHost, message.RelayPort);
+
+        var sessionData = Encoding.UTF8.GetBytes($"{message.SessionId}|{message.Role}");
+        await relayClient.SendAsync(sessionData, 0, sessionData.Length);
+
+        _isHolePunching = false;
+        GetSession(sessionId).UseRelay(relayClient);
+        OnModeChanged?.Invoke(PeerTransportMode.Relay);
+        StartRelayProbeLoop();
+    }
+
+    public async Task HandleErrorAsync(ErrorMessage error)
+    {
+        OnStatusChanged?.Invoke($"Error: {error.Message}");
+        if (error.Code == 404)
+        {
+            return;
+        }
+
+        await RequestRelayIfAllowedAsync();
+    }
+
+    // ─── Internal handler methods (also used by standalone router) ───
+
     private async Task StartHolePunchAsync(string sessionId, uint conv, IPEndPoint? targetEndPoint, IPEndPoint? targetEndPointV6, bool allowRelayFallback, StunNatType targetNatType)
     {
         if (GetSession(sessionId).Mode == PeerTransportMode.P2pDirect)
@@ -365,7 +514,7 @@ public sealed class ConnectionNegotiator : IDisposable
         }
 
         _isHolePunching = true;
-        
+
         if (targetEndPoint != null)
         {
             _pendingPunches[GetAddressKey(targetEndPoint.Address)] = new PendingPunch(sessionId, conv);
@@ -374,7 +523,7 @@ public sealed class ConnectionNegotiator : IDisposable
         {
             _pendingPunches[GetAddressKey(targetEndPointV6.Address)] = new PendingPunch(sessionId, conv);
         }
-        
+
         OnModeChanged?.Invoke(PeerTransportMode.None);
         OnStatusChanged?.Invoke("State: HolePunching");
 
@@ -392,9 +541,9 @@ public sealed class ConnectionNegotiator : IDisposable
             });
         }
 
-        bool predictPorts = _natDetection != null && 
-                            _natDetection.NatType != StunNatType.Symmetric && 
-                            _natDetection.NatType != StunNatType.Blocked && 
+        bool predictPorts = _natDetection != null &&
+                            _natDetection.NatType != StunNatType.Symmetric &&
+                            _natDetection.NatType != StunNatType.Blocked &&
                             targetNatType == StunNatType.Symmetric;
 
         if (predictPorts)
@@ -480,31 +629,13 @@ public sealed class ConnectionNegotiator : IDisposable
         return P2pFailureExplainer.Describe(_natDetection);
     }
 
-    private async Task HandleRelayAcceptAsync(RelayAccept message)
-    {
-        OnStatusChanged?.Invoke($"Relay accepted. Session: {message.SessionId}");
-        var sessionId = string.IsNullOrWhiteSpace(message.SessionId) ? _activeSessionId : message.SessionId;
-        _activeSessionId = sessionId;
-
-        var relayClient = new RelayClient();
-        await relayClient.ConnectAsync(_options.SignalingServerHost, message.RelayPort);
-
-        var sessionData = Encoding.UTF8.GetBytes($"{message.SessionId}|{message.Role}");
-        await relayClient.SendAsync(sessionData, 0, sessionData.Length);
-
-        _isHolePunching = false;
-        GetSession(sessionId).UseRelay(relayClient);
-        OnModeChanged?.Invoke(PeerTransportMode.Relay);
-        StartRelayProbeLoop();
-    }
-
     private async Task HandleP2pUnhealthyAsync(string sessionId, string reason)
     {
         OnStatusChanged?.Invoke($"P2P unhealthy on session {sessionId}: {reason}");
         await RequestRelayIfAllowedAsync();
     }
 
-    private async Task HandleErrorAsync(ErrorMessage error)
+    private async Task ProcessErrorAsync(ErrorMessage error)
     {
         OnStatusChanged?.Invoke($"Error: {error.Message}");
         if (error.Code == 404)
@@ -526,7 +657,8 @@ public sealed class ConnectionNegotiator : IDisposable
 
     private async Task RequestRelayAsync()
     {
-        if (_signalingConnectionLoop.Client?.IsConnected != true || string.IsNullOrWhiteSpace(_options.TargetNodeId))
+        var client = _signalingConnectionLoop.Client;
+        if (client?.IsConnected != true || string.IsNullOrWhiteSpace(_options.TargetNodeId))
         {
             return;
         }
@@ -537,7 +669,7 @@ public sealed class ConnectionNegotiator : IDisposable
             SessionId = _activeSessionId
         };
 
-        await _signalingConnectionLoop.Client.SendAsync(MessageSerializer.SerializeToString(request));
+        await client.SendAsync(MessageSerializer.SerializeToString(request));
     }
 
     private void StartRelayProbeLoop()
@@ -581,7 +713,10 @@ public sealed class ConnectionNegotiator : IDisposable
 
     private void StartLanDiscoveryBroadcast()
     {
-        var clientPort = _holePuncher!.LocalEndPoint?.Port ?? 0;
+        var puncher = GetHolePuncher();
+        if (puncher == null) return;
+
+        var clientPort = puncher.LocalEndPoint?.Port ?? 0;
         var tempConv = (uint)Random.Shared.Next(100000, 99999999);
         _ = Task.Run(async () =>
         {
@@ -592,7 +727,14 @@ public sealed class ConnectionNegotiator : IDisposable
                     break;
                 }
 
-                await _lanDiscovery!.BroadcastQueryAsync(_options.TargetNodeId, clientPort, tempConv);
+                if (_injectedUdpStack?.LanDiscovery is { } ld)
+                {
+                    await ld.BroadcastQueryAsync(_options.TargetNodeId, clientPort, tempConv);
+                }
+                else if (_lanDiscovery != null)
+                {
+                    await _lanDiscovery.BroadcastQueryAsync(_options.TargetNodeId, clientPort, tempConv);
+                }
                 await Task.Delay(100);
             }
         });
@@ -644,9 +786,28 @@ public sealed class ConnectionNegotiator : IDisposable
         _connectionRequestLock.Dispose();
         _relayProbeCts?.Cancel();
         _relayProbeCts?.Dispose();
-        _signalingConnectionLoop.Dispose();
-        _holePuncher?.Dispose();
-        _lanDiscovery?.Dispose();
+
+        if (_ownsSharedStacks)
+        {
+            // Standalone mode: we own all resources
+            _signalingConnectionLoop.Dispose();
+            _holePuncher?.Dispose();
+            _lanDiscovery?.Dispose();
+        }
+        else
+        {
+            // Shared-stack mode: unregister from dispatcher, don't dispose shared resources
+            if (_injectedSignalingStack != null)
+            {
+                _injectedSignalingStack.Dispatcher.UnregisterNode(_options.TargetNodeId);
+                // Unregister all sessions we own
+                foreach (var kvp in _sessions)
+                {
+                    _injectedSignalingStack.Dispatcher.UnregisterSession(kvp.Key);
+                }
+            }
+        }
+
         foreach (var session in _sessions.Values)
         {
             session.Dispose();
