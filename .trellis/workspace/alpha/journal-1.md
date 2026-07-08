@@ -38,3 +38,36 @@ Completed the WebSocket signaling transport channel: wired --ws-port and --signa
 ### Next Steps
 
 - None - task complete
+
+
+## Session 2: Wire bandwidth rate-limit and QoS into runtime
+
+**Date**: 2026-07-09
+**Task**: Wire bandwidth rate-limit and QoS into runtime
+**Branch**: `main`
+
+### Summary
+
+Wired the already-implemented TokenBucket/PriorityFrameQueue/PeerTransportSession QoS core into the runtime (prior commit left SetRateLimit/SetPriority never called). PeerConnectionOptions carries rate/priority; GetSession applies them; SendUnreliableAsync applies the bucket before raw UDP (D4); ExtranetPeer aggregates per-node QoS (most-restrictive rate, highest priority) into TunnelRouter; CLI --rate-limit/--priority; TUI shows rate stats. Check agent caught a real pending-local leak bug (self-fixed) + flagged MEDIUM control-frame priority gap (committed core logic, follow-up). 8 files +128/-6; build 0 warnings; 56/56 tests; AOT publish OK. Spec captured in bandwidth-qos.md.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `53021fd` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
