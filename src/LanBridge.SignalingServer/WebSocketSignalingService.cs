@@ -19,11 +19,25 @@ public sealed class WebSocketSignalingService : IDisposable
     private readonly ConcurrentDictionary<string, WebSocket> _clients = new();
     private bool _isRunning;
 
-    public WebSocketSignalingService(int wsPort, SignalingService signalingService)
+    /// <summary>
+    /// Creates the WS signaling listener.
+    /// </summary>
+    /// <param name="wsPort">TCP port for the HTTP/WS listener.</param>
+    /// <param name="signalingService">Shared signaling service (bridges messages).</param>
+    /// <param name="bindAllNics">
+    /// When <c>true</c> (default, production), binds <c>http://+:&lt;port&gt;/</c> on all
+    /// NICs and matches any client Host header. When <c>false</c>, binds
+    /// <c>http://localhost:&lt;port&gt;/</c> only — no admin/urlacl needed, but WS clients
+    /// MUST connect using <c>localhost</c> as the host (HttpListener matches the request
+    /// Host header against the prefix; a 127.0.0.1 client would be rejected). Intended for
+    /// in-process integration tests.
+    /// </param>
+    public WebSocketSignalingService(int wsPort, SignalingService signalingService, bool bindAllNics = true)
     {
         _signalingService = signalingService;
         _listener = new HttpListener();
-        _listener.Prefixes.Add($"http://+:{wsPort}/signaling/");
+        var host = bindAllNics ? "+" : "localhost";
+        _listener.Prefixes.Add($"http://{host}:{wsPort}/signaling/");
     }
 
     public async Task StartAsync(CancellationToken ct)

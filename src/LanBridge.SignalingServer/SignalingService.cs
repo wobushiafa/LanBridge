@@ -24,6 +24,13 @@ public class SignalingService : IDisposable
     public event Action<string, BaseMessage>? OnMessageReceived;
 
     /// <summary>
+    /// Actual TCP port the listener bound to. Differs from
+    /// <see cref="ServerConfig.SignalingPort"/> when that was configured as 0
+    /// (OS-assigned ephemeral port). Returns 0 before <see cref="StartAsync"/>.
+    /// </summary>
+    public int ActualPort => (_listener.LocalEndpoint as IPEndPoint)?.Port ?? 0;
+
+    /// <summary>
     /// Outbound channel for a non-TCP transport (e.g. WebSocket) keyed by clientId.
     /// </summary>
     private sealed record TransportBridge(
