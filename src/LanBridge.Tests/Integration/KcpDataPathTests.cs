@@ -141,4 +141,31 @@ public class KcpDataPathTests
         Assert.Equal(payload.Length, got.Length);
         Assert.True(payload.SequenceEqual(got));
     }
+
+    /// <summary>
+    /// Regression guard for the 64KB-receive-buffer cap: a single KCP message of
+    /// exactly 65536 bytes (the KcpSession.InputPacket receive buffer size) must
+    /// be delivered intact. The data path (ExtranetPeer/IntranetPeer) caps TCP
+    /// reads so a framed message never exceeds this 65536 limit (16-byte header +
+    /// ≤65520 payload). If the receive buffer were shrunk below 65536, this fails
+    /// with -2 (buffer too small); if the send-side cap were reverted (allowing
+    /// >65536-byte messages), a peer read burst would silently drop. This test
+    /// pins the receive-side half of that invariant.
+    /// </summary>
+    [Fact(Timeout = 30000)]
+    public async Task Kcp_DeliversMaxSafeMessage_65536Bytes()
+    {
+        using var pair = new KcpLoopbackPair();
+        var tcs = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
+        pair.SessionB.OnDataReceived += (d, n) => tcs.TrySetResult(d[..n]);
+        pair.Start();
+
+        var payload = new byte[65536];
+        Random.Shared.NextBytes(payload);
+        pair.SessionA.Send(payload, 0, payload.Length);
+
+        var got = await tcs.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.Equal(65536, got.Length);
+        Assert.True(payload.SequenceEqual(got));
+    }
 }

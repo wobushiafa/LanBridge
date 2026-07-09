@@ -514,7 +514,7 @@ public class ExtranetPeer : IDisposable
 
     private async Task HandleLocalClientAsync(uint streamId, TcpClient client, TunnelMapping mapping)
     {
-        var buffer = System.Buffers.ArrayPool<byte>.Shared.Rent(65536 + 16);
+        var buffer = System.Buffers.ArrayPool<byte>.Shared.Rent(65536);
 
         try
         {

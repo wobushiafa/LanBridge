@@ -377,7 +377,7 @@ public class IntranetPeer : IDisposable
 
     private async Task ReadTcpTargetLoopAsync(string sessionId, uint streamId, TcpTargetConnection connection)
     {
-        var buffer = System.Buffers.ArrayPool<byte>.Shared.Rent(65536 + 16);
+        var buffer = System.Buffers.ArrayPool<byte>.Shared.Rent(65536);
 
         try
         {
