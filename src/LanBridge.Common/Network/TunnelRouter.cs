@@ -106,24 +106,9 @@ public sealed class TunnelRouter : IDisposable
                 ? qos
                 : (0L, _baseOptions.Priority);
 
-            var options = new PeerConnectionOptions
+            var options = _baseOptions with
             {
-                Role = _baseOptions.Role,
-                NodeId = _baseOptions.NodeId,
-                SignalingServerHost = _baseOptions.SignalingServerHost,
-                SignalingServerPort = _baseOptions.SignalingServerPort,
-                StunServerHost = _baseOptions.StunServerHost,
-                StunServerPort = _baseOptions.StunServerPort,
-                StunAlternateServerPort = _baseOptions.StunAlternateServerPort,
-                Token = _baseOptions.Token,
-                UdpPort = _baseOptions.UdpPort,
                 TargetNodeId = nodeId,
-                HolePunchTimeoutMs = _baseOptions.HolePunchTimeoutMs,
-                EnableRelayFallback = _baseOptions.EnableRelayFallback,
-                Verbose = _baseOptions.Verbose,
-                EnableKcpCongestionControl = _baseOptions.EnableKcpCongestionControl,
-                SignalingTransport = _baseOptions.SignalingTransport,
-                SignalingWsPort = _baseOptions.SignalingWsPort,
                 RateLimitBytesPerSec = rateLimit,
                 Priority = priority
             };

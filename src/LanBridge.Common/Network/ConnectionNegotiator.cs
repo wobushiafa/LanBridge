@@ -13,7 +13,7 @@ public enum PeerConnectionRole
     Extranet
 }
 
-public sealed class PeerConnectionOptions
+public sealed record PeerConnectionOptions
 {
     public PeerConnectionRole Role { get; init; }
     public string NodeId { get; init; } = string.Empty;
