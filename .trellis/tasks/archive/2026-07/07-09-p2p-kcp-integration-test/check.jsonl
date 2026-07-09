@@ -1,0 +1,1 @@
+{"file": ".trellis/spec/backend/bandwidth-qos.md", "reason": "验证 P2P 路径限速测试是否真正覆盖 PeerTransportSession.SendAsync 的桶检查在 KCP 路径上"}

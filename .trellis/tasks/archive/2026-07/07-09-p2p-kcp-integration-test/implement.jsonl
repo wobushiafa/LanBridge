@@ -1,0 +1,1 @@
+{"file": ".trellis/spec/backend/bandwidth-qos.md", "reason": "REQ-3 验证限速在真实 KCP 路径生效——spec 的 D4/零开销契约在 P2P 数据面的延伸验证"}
