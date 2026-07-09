@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 7
-- **Last Active**: 2026-07-09
+- **Total Sessions**: 8
+- **Last Active**: 2026-07-10
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~238 | Active |
+| `journal-1.md` | ~271 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 8 | 2026-07-10 | Enhance TUI dashboard observability | `0ff0284` | `main` |
 | 7 | 2026-07-09 | Unify SignalingService connection abstraction | `0a87a34` | `main` |
 | 6 | 2026-07-09 | Add P2P/KCP data-path integration tests | `45d134b` | `main` |
 | 5 | 2026-07-09 | ConnectionNegotiator split phase 2: extract NAT/punch subsystem | `9f9917b` | `main` |

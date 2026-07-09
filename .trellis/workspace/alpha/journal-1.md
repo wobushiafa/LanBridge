@@ -236,3 +236,36 @@ Unified SignalingService dual-track connection mgmt (TCP raw objects + WS delega
 ### Next Steps
 
 - None - task complete
+
+
+## Session 8: Enhance TUI dashboard observability
+
+**Date**: 2026-07-10
+**Task**: Enhance TUI dashboard observability
+**Branch**: `main`
+
+### Summary
+
+TuiDashboard: NegotiatorStats +6 KCP fields (RTT/cwnd/WaitSnd/SentBytes/ReceivedBytes/InputErrors), ctor takes multi-tunnel list, per-tunnel table + KCP link stats + live throughput (delta/interval, human-readable) + real telemetry (peers had none—added OperationalTelemetry + state_* counter). ExtranetPeer passes ALL negotiators (was first-only); empty telemetry callback fixed. IntranetPeer gained --tui (was TUI-less). 6 files +217/-43. 69/69 tests pass, AOT publish clean.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `0ff0284` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
