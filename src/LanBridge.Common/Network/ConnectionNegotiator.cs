@@ -39,7 +39,7 @@ public sealed class ConnectionNegotiator : IDisposable, ISignalingHandler
 {
     private readonly PeerConnectionOptions _options;
     private readonly PeerNatDiagnostics _natDiagnostics;
-    private readonly ConcurrentDictionary<string, PeerTransportSession> _sessions = new();
+    private readonly PeerSessionManager _sessions;
     private readonly ConcurrentDictionary<string, PendingPunch> _pendingPunches = new();
     private readonly SemaphoreSlim _connectionRequestLock = new(1, 1);
     private readonly CancellationTokenSource _cts = new();
@@ -60,7 +60,6 @@ public sealed class ConnectionNegotiator : IDisposable, ISignalingHandler
     private NatDetectionResult? _natDetection;
     private CancellationTokenSource? _relayProbeCts;
     private volatile bool _isHolePunching;
-    private string _activeSessionId = "default";
     private DateTime _lastConnectionRequestUtc = DateTime.MinValue;
     private bool _isNatKeepAliveRunning;
 
@@ -71,8 +70,8 @@ public sealed class ConnectionNegotiator : IDisposable, ISignalingHandler
     public event Action? OnSignalingDisconnected;
 
     public IPEndPoint? PublicEndPoint => _publicEndPoint;
-    public PeerTransportMode Mode => GetSession(_activeSessionId).Mode;
-    public bool IsConnected => GetSession(_activeSessionId).IsConnected;
+    public PeerTransportMode Mode => _sessions.Mode;
+    public bool IsConnected => _sessions.IsConnected;
     public bool IsSignalingConnected => _signalingConnectionLoop.IsConnected;
     public string TargetNodeId => _options.TargetNodeId;
 
@@ -85,6 +84,9 @@ public sealed class ConnectionNegotiator : IDisposable, ISignalingHandler
         _options = options;
         _natDiagnostics = new PeerNatDiagnostics(options, status => OnStatusChanged?.Invoke(status));
         _ownsSharedStacks = true;
+
+        _sessions = new PeerSessionManager(options);
+        WireSessionManagerEvents();
 
         _standaloneRouter = new SignalingMessageRouter(
             status => OnStatusChanged?.Invoke(status),
@@ -119,11 +121,23 @@ public sealed class ConnectionNegotiator : IDisposable, ISignalingHandler
         _injectedSignalingStack = signalingStack;
         _ownsSharedStacks = false;
 
+        _sessions = new PeerSessionManager(options);
+        WireSessionManagerEvents();
+
         // Use the shared signaling stack's connection loop and dispatcher
         _signalingConnectionLoop = signalingStack.ConnectionLoop;
 
         // Register ourselves as a handler for our target node and sessions
         signalingStack.Dispatcher.RegisterNode(_options.TargetNodeId, this);
+    }
+
+    private void WireSessionManagerEvents()
+    {
+        _sessions.OnDataReceived += (data, length) => OnDataReceived?.Invoke(data, length);
+        _sessions.OnSessionDataReceived += (id, data, length) => OnSessionDataReceived?.Invoke(id, data, length);
+        _sessions.OnModeChanged += mode => OnModeChanged?.Invoke(mode);
+        _sessions.OnStatusChanged += status => OnStatusChanged?.Invoke(status);
+        _sessions.OnP2pUnhealthy += (id, reason) => _ = HandleP2pUnhealthyAsync(id, reason);
     }
 
     private sealed record PendingPunch(string SessionId, uint Conv);
@@ -144,7 +158,7 @@ public sealed class ConnectionNegotiator : IDisposable, ISignalingHandler
 
     public async Task HandleLanDiscoveryRequestAsync(IPEndPoint clientEndPoint, uint conv)
     {
-        var sessionId = _activeSessionId;
+        var sessionId = _sessions.ActiveSessionId;
 
         // Register the client in pending punches so it gets picked up by MarkPunched
         _pendingPunches[GetAddressKey(clientEndPoint.Address)] = new PendingPunch(sessionId, conv);
@@ -285,34 +299,34 @@ public sealed class ConnectionNegotiator : IDisposable, ISignalingHandler
         return IsConnected;
     }
 
-    public async Task SendAsync(byte[] data, int offset, int length)
+    public Task SendAsync(byte[] data, int offset, int length)
     {
-        await SendAsync(_activeSessionId, data, offset, length);
+        return _sessions.SendAsync(data, offset, length);
     }
 
-    public async Task SendAsync(string sessionId, byte[] data, int offset, int length)
+    public Task SendAsync(string sessionId, byte[] data, int offset, int length)
     {
-        await GetSession(sessionId).SendAsync(data, offset, length);
+        return _sessions.SendAsync(sessionId, data, offset, length);
     }
 
     public Task SendHighPriorityAsync(string sessionId, byte[] data, int offset, int length)
     {
-        return GetSession(sessionId).SendHighPriorityAsync(data, offset, length);
+        return _sessions.SendHighPriorityAsync(sessionId, data, offset, length);
     }
 
     public Task SendHighPriorityAsync(byte[] data, int offset, int length)
     {
-        return SendHighPriorityAsync(_activeSessionId, data, offset, length);
+        return _sessions.SendHighPriorityAsync(data, offset, length);
     }
 
     public async Task SendUnreliableAsync(byte[] data, int offset, int length)
     {
-        await SendUnreliableAsync(_activeSessionId, data, offset, length);
+        await SendUnreliableAsync(_sessions.ActiveSessionId, data, offset, length);
     }
 
     public async Task SendUnreliableAsync(string sessionId, byte[] data, int offset, int length)
     {
-        var session = GetSession(sessionId);
+        var session = _sessions.GetSession(sessionId);
         var puncher = GetHolePuncher();
         if (session.Mode == PeerTransportMode.P2pDirect && puncher?.RemoteEndPoint != null)
         {
@@ -332,35 +346,6 @@ public sealed class ConnectionNegotiator : IDisposable, ISignalingHandler
         }
 
         await session.SendAsync(data, offset, length);
-    }
-
-    private PeerTransportSession GetSession(string sessionId)
-    {
-        return _sessions.GetOrAdd(sessionId, id =>
-        {
-            var transport = new PeerTransportSession(_options.Verbose);
-            transport.SetPriority(_options.Priority);
-            if (_options.RateLimitBytesPerSec > 0)
-            {
-                transport.SetRateLimit(new TokenBucket(_options.RateLimitBytesPerSec));
-            }
-            transport.OnDataReceived += (data, length) =>
-            {
-                OnDataReceived?.Invoke(data, length);
-                OnSessionDataReceived?.Invoke(id, data, length);
-            };
-            transport.OnDisconnected += () =>
-            {
-                if (id == _activeSessionId)
-                {
-                    OnModeChanged?.Invoke(PeerTransportMode.None);
-                }
-                OnStatusChanged?.Invoke($"Transport disconnected: session {id}");
-            };
-            transport.OnStatusChanged += status => OnStatusChanged?.Invoke(status);
-            transport.OnP2pUnhealthy += reason => _ = HandleP2pUnhealthyAsync(id, reason);
-            return transport;
-        });
     }
 
     public async Task RequestConnectionAsync(bool force = false)
@@ -450,8 +435,8 @@ public sealed class ConnectionNegotiator : IDisposable, ISignalingHandler
             return;
         }
 
-        var sessionId = string.IsNullOrWhiteSpace(message.SessionId) ? _activeSessionId : message.SessionId;
-        _activeSessionId = sessionId;
+        var sessionId = string.IsNullOrWhiteSpace(message.SessionId) ? _sessions.ActiveSessionId : message.SessionId;
+        _sessions.SetActiveSession(sessionId);
 
         // Register this session with the dispatcher so future messages for this session route to us
         if (_injectedSignalingStack != null)
@@ -495,8 +480,8 @@ public sealed class ConnectionNegotiator : IDisposable, ISignalingHandler
     public async Task HandleRelayAcceptAsync(RelayAccept message)
     {
         OnStatusChanged?.Invoke($"Relay accepted. Session: {message.SessionId}");
-        var sessionId = string.IsNullOrWhiteSpace(message.SessionId) ? _activeSessionId : message.SessionId;
-        _activeSessionId = sessionId;
+        var sessionId = string.IsNullOrWhiteSpace(message.SessionId) ? _sessions.ActiveSessionId : message.SessionId;
+        _sessions.SetActiveSession(sessionId);
 
         // Register this session with the dispatcher
         if (_injectedSignalingStack != null)
@@ -511,7 +496,7 @@ public sealed class ConnectionNegotiator : IDisposable, ISignalingHandler
         await relayClient.SendAsync(sessionData, 0, sessionData.Length);
 
         _isHolePunching = false;
-        GetSession(sessionId).UseRelay(relayClient);
+        _sessions.GetSession(sessionId).UseRelay(relayClient);
         OnModeChanged?.Invoke(PeerTransportMode.Relay);
         StartRelayProbeLoop();
     }
@@ -531,7 +516,7 @@ public sealed class ConnectionNegotiator : IDisposable, ISignalingHandler
 
     private async Task StartHolePunchAsync(string sessionId, uint conv, IPEndPoint? targetEndPoint, IPEndPoint? targetEndPointV6, bool allowRelayFallback, StunNatType targetNatType)
     {
-        if (GetSession(sessionId).Mode == PeerTransportMode.P2pDirect)
+        if (_sessions.GetSession(sessionId).Mode == PeerTransportMode.P2pDirect)
         {
             return;
         }
@@ -603,8 +588,8 @@ public sealed class ConnectionNegotiator : IDisposable, ISignalingHandler
             _relayProbeCts?.Cancel();
             var session = new KcpSession(conv, _holePuncher.Client, endpoint, enableCongestionControl: _options.EnableKcpCongestionControl, ownReceiveLoop: false);
             _holePuncher.RegisterKcpSession(session);
-            GetSession(pending.SessionId).UseP2p(session);
-            if (pending.SessionId == _activeSessionId)
+            _sessions.GetSession(pending.SessionId).UseP2p(session);
+            if (pending.SessionId == _sessions.ActiveSessionId)
             {
                 OnModeChanged?.Invoke(PeerTransportMode.P2pDirect);
             }
@@ -617,7 +602,7 @@ public sealed class ConnectionNegotiator : IDisposable, ISignalingHandler
             OnStatusChanged?.Invoke($"[LAN Discovery] Discovered local peer at {endpoint}, conv={conv}. Direct-connecting...");
             _isHolePunching = false;
 
-            var sessionId = _activeSessionId;
+            var sessionId = _sessions.ActiveSessionId;
             _pendingPunches[GetAddressKey(endpoint.Address)] = new PendingPunch(sessionId, conv);
 
             _holePuncher.TriggerHolePunched(endpoint, conv);
@@ -641,7 +626,7 @@ public sealed class ConnectionNegotiator : IDisposable, ISignalingHandler
                 if (addr1.Equals(addr2))
                 {
                     OnDataReceived?.Invoke(buffer, length);
-                    OnSessionDataReceived?.Invoke(_activeSessionId, buffer, length);
+                    OnSessionDataReceived?.Invoke(_sessions.ActiveSessionId, buffer, length);
                 }
             }
         };
@@ -689,7 +674,7 @@ public sealed class ConnectionNegotiator : IDisposable, ISignalingHandler
         var request = new RelayRequest
         {
             TargetNodeId = _options.TargetNodeId,
-            SessionId = _activeSessionId
+            SessionId = _sessions.ActiveSessionId
         };
 
         await client.SendAsync(MessageSerializer.SerializeToString(request));
@@ -824,18 +809,14 @@ public sealed class ConnectionNegotiator : IDisposable, ISignalingHandler
             {
                 _injectedSignalingStack.Dispatcher.UnregisterNode(_options.TargetNodeId);
                 // Unregister all sessions we own
-                foreach (var kvp in _sessions)
+                foreach (var sessionId in _sessions.SessionIds)
                 {
-                    _injectedSignalingStack.Dispatcher.UnregisterSession(kvp.Key);
+                    _injectedSignalingStack.Dispatcher.UnregisterSession(sessionId);
                 }
             }
         }
 
-        foreach (var session in _sessions.Values)
-        {
-            session.Dispose();
-        }
-        _sessions.Clear();
+        _sessions.Dispose();
     }
 
     private async Task HandleSignalingConnectedAsync(SignalingTransportBase? transport)
@@ -857,13 +838,13 @@ public sealed class ConnectionNegotiator : IDisposable, ISignalingHandler
     /// </summary>
     public NegotiatorStats GetStatsSnapshot()
     {
-        var sessionStats = GetSession(_activeSessionId).GetStatsSnapshot();
+        var sessionStats = _sessions.GetStatsSnapshot();
         return new NegotiatorStats(
-            Mode,
+            _sessions.Mode,
             _natDetection?.NatType.ToString() ?? "Unknown",
             _publicEndPoint?.ToString(),
             IsSignalingConnected,
-            _sessions.Count,
+            _sessions.SessionCount,
             _options.TargetNodeId,
             sessionStats.RateLimitBytesPerSec,
             sessionStats.TokenBucketUtilization
