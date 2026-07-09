@@ -1,0 +1,1 @@
+{"file": ".trellis/spec/backend/bandwidth-qos.md", "reason": "TUI 显示 RateLimitBytesPerSec/TokenBucketUtilization——stats 字段契约的展示侧；不破坏接线"}

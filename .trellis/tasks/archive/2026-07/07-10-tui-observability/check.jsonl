@@ -1,0 +1,1 @@
+{"file": ".trellis/spec/backend/bandwidth-qos.md", "reason": "验证 TUI 增强未破坏 stats record 契约（RateLimit 字段仍在）"}
