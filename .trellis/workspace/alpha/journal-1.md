@@ -203,3 +203,36 @@ Added 4 loopback integration tests for the KCP data path (previously zero covera
 ### Next Steps
 
 - None - task complete
+
+
+## Session 7: Unify SignalingService connection abstraction
+
+**Date**: 2026-07-09
+**Task**: Unify SignalingService connection abstraction
+**Branch**: `main`
+
+### Summary
+
+Unified SignalingService dual-track connection mgmt (TCP raw objects + WS delegate bridges) into single ISignalingConnection abstraction: ISignalingConnection + TcpSignalingConnection + BridgeSignalingConnection. Single _connections registry, single-path SendToClientAsync, DisconnectClientAsync dropped TcpClient? param. RegisterConnection/UnregisterConnection + RemoveNodeBinding. WebSocketSignalingService 2 call sites updated. 2 deviations (DisconnectClientAsync doesn't double-count RemoveNodeBinding; dropped dead TcpClient param eliminating null! hack). SignalingService net -55 lines. 69/69 tests pass two runs, cross-transport integration green. Spec signaling-transport.md updated with new API.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `0a87a34` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
