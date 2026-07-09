@@ -1,7 +1,5 @@
 using System.Net;
-using System.Net.Sockets;
 using System.Text;
-using System.Collections.Concurrent;
 using LanBridge.Common.Diagnostics;
 using LanBridge.Common.Protocol;
 
@@ -38,9 +36,8 @@ public sealed record PeerConnectionOptions
 public sealed class ConnectionNegotiator : IDisposable, ISignalingHandler
 {
     private readonly PeerConnectionOptions _options;
-    private readonly PeerNatDiagnostics _natDiagnostics;
     private readonly PeerSessionManager _sessions;
-    private readonly ConcurrentDictionary<string, PendingPunch> _pendingPunches = new();
+    private readonly PeerPunchCoordinator _punch;
     private readonly SemaphoreSlim _connectionRequestLock = new(1, 1);
     private readonly CancellationTokenSource _cts = new();
 
@@ -52,16 +49,9 @@ public sealed class ConnectionNegotiator : IDisposable, ISignalingHandler
     // Self-owned instances for standalone mode
     private readonly SignalingMessageRouter? _standaloneRouter;
     private readonly SignalingConnectionLoop _signalingConnectionLoop;
-    private UdpHolePuncher? _holePuncher;
     private LanDiscoveryService? _lanDiscovery;
 
-    private IPEndPoint? _publicEndPoint;
-    private IPEndPoint? _publicEndPointV6;
-    private NatDetectionResult? _natDetection;
-    private CancellationTokenSource? _relayProbeCts;
-    private volatile bool _isHolePunching;
     private DateTime _lastConnectionRequestUtc = DateTime.MinValue;
-    private bool _isNatKeepAliveRunning;
 
     public event Action<string>? OnStatusChanged;
     public event Action<byte[], int>? OnDataReceived;
@@ -69,7 +59,7 @@ public sealed class ConnectionNegotiator : IDisposable, ISignalingHandler
     public event Action<PeerTransportMode>? OnModeChanged;
     public event Action? OnSignalingDisconnected;
 
-    public IPEndPoint? PublicEndPoint => _publicEndPoint;
+    public IPEndPoint? PublicEndPoint => _punch.PublicEndPoint;
     public PeerTransportMode Mode => _sessions.Mode;
     public bool IsConnected => _sessions.IsConnected;
     public bool IsSignalingConnected => _signalingConnectionLoop.IsConnected;
@@ -82,7 +72,6 @@ public sealed class ConnectionNegotiator : IDisposable, ISignalingHandler
     public ConnectionNegotiator(PeerConnectionOptions options)
     {
         _options = options;
-        _natDiagnostics = new PeerNatDiagnostics(options, status => OnStatusChanged?.Invoke(status));
         _ownsSharedStacks = true;
 
         _sessions = new PeerSessionManager(options);
@@ -104,6 +93,9 @@ public sealed class ConnectionNegotiator : IDisposable, ISignalingHandler
             HandleSignalingConnectedAsync,
             _options.SignalingTransport,
             _options.SignalingWsPort);
+
+        _punch = CreatePunchCoordinator();
+        WirePunchCoordinatorEvents();
     }
 
     /// <summary>
@@ -116,7 +108,6 @@ public sealed class ConnectionNegotiator : IDisposable, ISignalingHandler
         SharedSignalingStack signalingStack)
     {
         _options = options;
-        _natDiagnostics = new PeerNatDiagnostics(options, status => OnStatusChanged?.Invoke(status));
         _injectedUdpStack = udpStack;
         _injectedSignalingStack = signalingStack;
         _ownsSharedStacks = false;
@@ -129,6 +120,24 @@ public sealed class ConnectionNegotiator : IDisposable, ISignalingHandler
 
         // Register ourselves as a handler for our target node and sessions
         signalingStack.Dispatcher.RegisterNode(_options.TargetNodeId, this);
+
+        _punch = CreatePunchCoordinator();
+        WirePunchCoordinatorEvents();
+    }
+
+    private PeerPunchCoordinator CreatePunchCoordinator()
+    {
+        return new PeerPunchCoordinator(
+            _options,
+            _sessions,
+            attachP2p: (id, session) => _sessions.GetSession(id).UseP2p(session),
+            isConnected: () => IsConnected,
+            activeSessionIdProvider: () => _sessions.ActiveSessionId,
+            isSignalingConnected: () => IsSignalingConnected,
+            modeProvider: () => Mode,
+            requestRelayAsync: () => RequestRelayAsync(),
+            requestConnectionAsync: force => RequestConnectionAsync(force),
+            registerNodeAsync: () => RegisterNodeAsync());
     }
 
     private void WireSessionManagerEvents()
@@ -140,15 +149,15 @@ public sealed class ConnectionNegotiator : IDisposable, ISignalingHandler
         _sessions.OnP2pUnhealthy += (id, reason) => _ = HandleP2pUnhealthyAsync(id, reason);
     }
 
-    private sealed record PendingPunch(string SessionId, uint Conv);
-
-    private static string GetAddressKey(IPAddress address)
+    private void WirePunchCoordinatorEvents()
     {
-        if (address.IsIPv4MappedToIPv6)
+        _punch.OnStatusChanged += status => OnStatusChanged?.Invoke(status);
+        _punch.OnModeChanged += mode => OnModeChanged?.Invoke(mode);
+        _punch.OnUnreliableDataReceived += (data, length, sessionId) =>
         {
-            return address.MapToIPv4().ToString();
-        }
-        return address.ToString();
+            OnDataReceived?.Invoke(data, length);
+            OnSessionDataReceived?.Invoke(sessionId, data, length);
+        };
     }
 
     public void RaiseStatusChanged(string status)
@@ -156,48 +165,17 @@ public sealed class ConnectionNegotiator : IDisposable, ISignalingHandler
         OnStatusChanged?.Invoke(status);
     }
 
-    public async Task HandleLanDiscoveryRequestAsync(IPEndPoint clientEndPoint, uint conv)
-    {
-        var sessionId = _sessions.ActiveSessionId;
-
-        // Register the client in pending punches so it gets picked up by MarkPunched
-        _pendingPunches[GetAddressKey(clientEndPoint.Address)] = new PendingPunch(sessionId, conv);
-
-        var puncher = GetHolePuncher();
-        if (puncher != null)
-        {
-            OnStatusChanged?.Invoke($"[LAN Discovery] Received local query from {clientEndPoint}. Replying advertisement & establishing direct KCP session...");
-
-            // Reply with unicast advertisement containing target server port
-            var serverPort = puncher.LocalEndPoint?.Port ?? 0;
-            var advertiseMessage = $"LB_ADVERTISE:{_options.NodeId}:{serverPort}:{conv}";
-            var data = Encoding.UTF8.GetBytes(advertiseMessage);
-            await puncher.SendAsync(data, data.Length, clientEndPoint);
-
-            // Directly trigger punch completion!
-            puncher.TriggerHolePunched(clientEndPoint, conv);
-        }
-    }
+    public Task HandleLanDiscoveryRequestAsync(IPEndPoint clientEndPoint, uint conv)
+        => _punch.HandleLanDiscoveryRequestAsync(clientEndPoint, conv);
 
     public async Task StartAsync()
     {
+        // Build/acquire hole puncher, wire its events, and run NAT detection.
+        await _punch.StartAsync(_injectedUdpStack);
+
         if (_injectedUdpStack != null)
         {
-            // Shared-stack mode: use injected UdpHolePuncher and NAT detection
-            _holePuncher = _injectedUdpStack.HolePuncher;
-            _publicEndPoint = _injectedUdpStack.PublicEndPoint;
-            _publicEndPointV6 = _injectedUdpStack.PublicEndPointV6;
-            _natDetection = _injectedUdpStack.NatDetection;
-
-            // If NAT detection hasn't been done yet, do it now (shared across all negotiators)
-            await _injectedUdpStack.DetectNatAsync();
-            _publicEndPoint = _injectedUdpStack.PublicEndPoint;
-            _publicEndPointV6 = _injectedUdpStack.PublicEndPointV6;
-            _natDetection = _injectedUdpStack.NatDetection;
-
-            ConfigureHolePuncherEvents();
-
-            // Start LAN discovery (only once, managed by SharedUdpStack)
+            // Shared-stack mode: LAN discovery is managed by the shared stack.
             if (_options.Role == PeerConnectionRole.Intranet || _options.Role == PeerConnectionRole.Extranet)
             {
                 _injectedUdpStack.StartLanDiscovery(this);
@@ -217,16 +195,13 @@ public sealed class ConnectionNegotiator : IDisposable, ISignalingHandler
             {
                 await RegisterNodeAsync();
                 OnStatusChanged?.Invoke("Ready");
-                StartNatKeepAliveLoop();
+                _punch.StartNatKeepAliveLoop(_cts.Token);
             }
         }
         else
         {
-            // Standalone mode: create and own all infrastructure
-            _holePuncher = new UdpHolePuncher(_options.UdpPort, _options.NodeId);
-            ConfigureHolePuncherEvents();
-
-            // Start LAN Discovery Service to scan and respond to local subnets
+            // Standalone mode: LanDiscoveryService needs a ConnectionNegotiator reference
+            // (circular dependency if the coordinator built it), so it stays here.
             _lanDiscovery = new LanDiscoveryService(_options.NodeId, this, _options.Verbose);
             _lanDiscovery.Start();
 
@@ -235,69 +210,13 @@ public sealed class ConnectionNegotiator : IDisposable, ISignalingHandler
                 StartLanDiscoveryBroadcast();
             }
 
-            await DetectNatAsync();
-
             // Start signaling connection manager loop in background
             _ = Task.Run(() => _signalingConnectionLoop.RunAsync(_cts.Token), _cts.Token);
         }
     }
 
-    private UdpHolePuncher? GetHolePuncher() => _holePuncher;
-
-    private void StartNatKeepAliveLoop()
-    {
-        if (_options.Role != PeerConnectionRole.Intranet)
-        {
-            return;
-        }
-
-        if (_isNatKeepAliveRunning)
-        {
-            return;
-        }
-        _isNatKeepAliveRunning = true;
-
-        _ = _natDiagnostics.RunKeepAliveLoopAsync(
-            _holePuncher!,
-            _cts.Token,
-            shouldProbe: () => IsSignalingConnected && !IsConnected && !_isHolePunching,
-            currentPublicEndPointProvider: () => _publicEndPoint,
-            onMappingChangedAsync: async endpoint =>
-            {
-                _publicEndPoint = endpoint;
-                await RegisterNodeAsync();
-            }).ContinueWith(_ =>
-        {
-            _isNatKeepAliveRunning = false;
-        }, CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default);
-    }
-
-    public async Task<bool> EnsureConnectedAsync(TimeSpan timeout, CancellationToken cancellationToken)
-    {
-        if (IsConnected)
-        {
-            return true;
-        }
-
-        if (_options.Role == PeerConnectionRole.Extranet)
-        {
-            await RequestConnectionAsync(force: false);
-        }
-
-        var deadline = DateTime.UtcNow.Add(timeout);
-        while (DateTime.UtcNow < deadline)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            if (IsConnected)
-            {
-                return true;
-            }
-
-            await Task.Delay(100, cancellationToken);
-        }
-
-        return IsConnected;
-    }
+    public Task<bool> EnsureConnectedAsync(TimeSpan timeout, CancellationToken cancellationToken)
+        => _punch.EnsureConnectedAsync(timeout, cancellationToken);
 
     public Task SendAsync(byte[] data, int offset, int length)
     {
@@ -319,34 +238,11 @@ public sealed class ConnectionNegotiator : IDisposable, ISignalingHandler
         return _sessions.SendHighPriorityAsync(data, offset, length);
     }
 
-    public async Task SendUnreliableAsync(byte[] data, int offset, int length)
-    {
-        await SendUnreliableAsync(_sessions.ActiveSessionId, data, offset, length);
-    }
+    public Task SendUnreliableAsync(byte[] data, int offset, int length)
+        => _punch.SendUnreliableAsync(data, offset, length);
 
-    public async Task SendUnreliableAsync(string sessionId, byte[] data, int offset, int length)
-    {
-        var session = _sessions.GetSession(sessionId);
-        var puncher = GetHolePuncher();
-        if (session.Mode == PeerTransportMode.P2pDirect && puncher?.RemoteEndPoint != null)
-        {
-            try
-            {
-                await session.ApplyRateLimitAsync(length, CancellationToken.None);
-                await puncher.Client.SendAsync(new ReadOnlyMemory<byte>(data, offset, length), puncher.RemoteEndPoint);
-                return;
-            }
-            catch (Exception ex)
-            {
-                if (_options.Verbose)
-                {
-                    OnStatusChanged?.Invoke($"Unreliable direct send failed: {ex.Message}");
-                }
-            }
-        }
-
-        await session.SendAsync(data, offset, length);
-    }
+    public Task SendUnreliableAsync(string sessionId, byte[] data, int offset, int length)
+        => _punch.SendUnreliableAsync(sessionId, data, offset, length);
 
     public async Task RequestConnectionAsync(bool force = false)
     {
@@ -377,9 +273,9 @@ public sealed class ConnectionNegotiator : IDisposable, ISignalingHandler
             var request = new ConnectRequest
             {
                 TargetNodeId = _options.TargetNodeId,
-                ClientEndPoint = _publicEndPoint?.ToString(),
-                ClientEndPointV6 = _publicEndPointV6?.ToString(),
-                NatType = _natDetection?.NatType ?? StunNatType.Unknown
+                ClientEndPoint = _punch.PublicEndPoint?.ToString(),
+                ClientEndPointV6 = _punch.PublicEndPointV6?.ToString(),
+                NatType = _punch.NatDetection?.NatType ?? StunNatType.Unknown
             };
 
             await client.SendAsync(MessageSerializer.SerializeToString(request));
@@ -390,14 +286,6 @@ public sealed class ConnectionNegotiator : IDisposable, ISignalingHandler
         {
             _connectionRequestLock.Release();
         }
-    }
-
-    private async Task DetectNatAsync()
-    {
-        var snapshot = await _natDiagnostics.DetectAsync(_holePuncher!);
-        _natDetection = snapshot.Detection;
-        _publicEndPoint = snapshot.PublicEndPoint;
-        _publicEndPointV6 = snapshot.PublicEndPointV6;
     }
 
     private async Task RegisterNodeAsync()
@@ -412,9 +300,9 @@ public sealed class ConnectionNegotiator : IDisposable, ISignalingHandler
         {
             NodeId = _options.NodeId,
             Token = _options.Token,
-            PublicEndPoint = _publicEndPoint?.ToString(),
-            PublicEndPointV6 = _publicEndPointV6?.ToString(),
-            NatType = _natDetection?.NatType ?? StunNatType.Unknown
+            PublicEndPoint = _punch.PublicEndPoint?.ToString(),
+            PublicEndPointV6 = _punch.PublicEndPointV6?.ToString(),
+            NatType = _punch.NatDetection?.NatType ?? StunNatType.Unknown
         };
 
         await client.SendAsync(MessageSerializer.SerializeToString(register));
@@ -444,13 +332,13 @@ public sealed class ConnectionNegotiator : IDisposable, ISignalingHandler
             _injectedSignalingStack.Dispatcher.RegisterSession(sessionId, this);
         }
 
-        await BeginHolePunchFromSignalAsync(
+        await _punch.BeginHolePunchFromSignalAsync(
             sessionId,
             _options.Role == PeerConnectionRole.Intranet ? message.ExtranetEndPoint : message.IntranetEndPoint,
             _options.Role == PeerConnectionRole.Intranet ? message.ExtranetEndPointV6 : message.IntranetEndPointV6,
             message.Conv,
             message.TargetNatType,
-            $"Connection ready. Starting hole punch to {{0}}");
+            $"Connection ready. Starting hole punch to {0}");
     }
 
     public async Task HandleHolePunchStartAsync(HolePunchStart message)
@@ -468,13 +356,13 @@ public sealed class ConnectionNegotiator : IDisposable, ISignalingHandler
             _injectedSignalingStack.Dispatcher.RegisterSession(sessionId, this);
         }
 
-        await BeginHolePunchFromSignalAsync(
+        await _punch.BeginHolePunchFromSignalAsync(
             sessionId,
             message.TargetEndPoint,
             message.TargetEndPointV6,
             message.Conv,
             message.TargetNatType,
-            $"Hole punch request to {{0}}");
+            $"Hole punch request to {0}");
     }
 
     public async Task HandleRelayAcceptAsync(RelayAccept message)
@@ -495,10 +383,10 @@ public sealed class ConnectionNegotiator : IDisposable, ISignalingHandler
         var sessionData = Encoding.UTF8.GetBytes($"{message.SessionId}|{message.Role}");
         await relayClient.SendAsync(sessionData, 0, sessionData.Length);
 
-        _isHolePunching = false;
+        _punch.StopHolePunching();
         _sessions.GetSession(sessionId).UseRelay(relayClient);
         OnModeChanged?.Invoke(PeerTransportMode.Relay);
-        StartRelayProbeLoop();
+        _punch.StartRelayProbeLoop();
     }
 
     public async Task HandleErrorAsync(ErrorMessage error)
@@ -513,129 +401,6 @@ public sealed class ConnectionNegotiator : IDisposable, ISignalingHandler
     }
 
     // ─── Internal handler methods (also used by standalone router) ───
-
-    private async Task StartHolePunchAsync(string sessionId, uint conv, IPEndPoint? targetEndPoint, IPEndPoint? targetEndPointV6, bool allowRelayFallback, StunNatType targetNatType)
-    {
-        if (_sessions.GetSession(sessionId).Mode == PeerTransportMode.P2pDirect)
-        {
-            return;
-        }
-
-        _isHolePunching = true;
-
-        if (targetEndPoint != null)
-        {
-            _pendingPunches[GetAddressKey(targetEndPoint.Address)] = new PendingPunch(sessionId, conv);
-        }
-        if (targetEndPointV6 != null)
-        {
-            _pendingPunches[GetAddressKey(targetEndPointV6.Address)] = new PendingPunch(sessionId, conv);
-        }
-
-        OnModeChanged?.Invoke(PeerTransportMode.None);
-        OnStatusChanged?.Invoke("State: HolePunching");
-
-        if (allowRelayFallback && _options.EnableRelayFallback)
-        {
-            _ = Task.Run(async () =>
-            {
-                await Task.Delay(_options.HolePunchTimeoutMs + 1000);
-                if (_isHolePunching && !IsConnected)
-                {
-                    OnStatusChanged?.Invoke("Hole punch timeout. Falling back to relay...");
-                    OnStatusChanged?.Invoke($"P2P failure reason: {ExplainP2pFailure()}");
-                    await RequestRelayAsync();
-                }
-            });
-        }
-
-        bool predictPorts = _natDetection != null &&
-                            _natDetection.NatType != StunNatType.Symmetric &&
-                            _natDetection.NatType != StunNatType.Blocked &&
-                            targetNatType == StunNatType.Symmetric;
-
-        if (predictPorts)
-        {
-            OnStatusChanged?.Invoke("Target is Symmetric NAT. Enabling port prediction for hole punching.");
-        }
-
-        if (targetEndPoint != null)
-        {
-            await _holePuncher!.StartPunchingAsync(targetEndPoint, targetEndPointV6, 200, _options.HolePunchTimeoutMs, predictPorts);
-        }
-        else if (targetEndPointV6 != null)
-        {
-            await _holePuncher!.StartPunchingAsync(targetEndPointV6, null, 200, _options.HolePunchTimeoutMs, predictPorts);
-        }
-    }
-
-    private void ConfigureHolePuncherEvents()
-    {
-        _holePuncher!.OnHolePunched += endpoint =>
-        {
-            OnStatusChanged?.Invoke($"Hole punched to {endpoint}");
-            _isHolePunching = false;
-
-            if (!_pendingPunches.TryRemove(GetAddressKey(endpoint.Address), out var pending))
-            {
-                OnStatusChanged?.Invoke($"Hole punched endpoint has no pending session: {endpoint}");
-                _holePuncher.RemovePunchedEndpoint(endpoint);
-                return;
-            }
-
-            var conv = pending.Conv != 0 ? pending.Conv : P2PConv.FromEndpoints(_publicEndPoint!, endpoint);
-            OnStatusChanged?.Invoke($"P2P conv: {conv}");
-            _relayProbeCts?.Cancel();
-            var session = new KcpSession(conv, _holePuncher.Client, endpoint, enableCongestionControl: _options.EnableKcpCongestionControl, ownReceiveLoop: false);
-            _holePuncher.RegisterKcpSession(session);
-            _sessions.GetSession(pending.SessionId).UseP2p(session);
-            if (pending.SessionId == _sessions.ActiveSessionId)
-            {
-                OnModeChanged?.Invoke(PeerTransportMode.P2pDirect);
-            }
-        };
-
-        _holePuncher.OnLanAdvertised += (endpoint, conv) =>
-        {
-            if (IsConnected) return;
-
-            OnStatusChanged?.Invoke($"[LAN Discovery] Discovered local peer at {endpoint}, conv={conv}. Direct-connecting...");
-            _isHolePunching = false;
-
-            var sessionId = _sessions.ActiveSessionId;
-            _pendingPunches[GetAddressKey(endpoint.Address)] = new PendingPunch(sessionId, conv);
-
-            _holePuncher.TriggerHolePunched(endpoint, conv);
-        };
-
-        _holePuncher.OnError += error =>
-        {
-            OnStatusChanged?.Invoke($"Hole punch error: {error}");
-            if (error.Contains("timeout", StringComparison.OrdinalIgnoreCase))
-            {
-                OnStatusChanged?.Invoke($"P2P failure reason: {ExplainP2pFailure()}");
-            }
-        };
-
-        _holePuncher.OnUnreliableDataReceived += (buffer, length, endpoint) =>
-        {
-            if (_holePuncher.RemoteEndPoint != null)
-            {
-                var addr1 = endpoint.Address.IsIPv4MappedToIPv6 ? endpoint.Address.MapToIPv4() : endpoint.Address;
-                var addr2 = _holePuncher.RemoteEndPoint.Address.IsIPv4MappedToIPv6 ? _holePuncher.RemoteEndPoint.Address.MapToIPv4() : _holePuncher.RemoteEndPoint.Address;
-                if (addr1.Equals(addr2))
-                {
-                    OnDataReceived?.Invoke(buffer, length);
-                    OnSessionDataReceived?.Invoke(_sessions.ActiveSessionId, buffer, length);
-                }
-            }
-        };
-    }
-
-    private string ExplainP2pFailure()
-    {
-        return P2pFailureExplainer.Describe(_natDetection);
-    }
 
     private async Task HandleP2pUnhealthyAsync(string sessionId, string reason)
     {
@@ -680,48 +445,9 @@ public sealed class ConnectionNegotiator : IDisposable, ISignalingHandler
         await client.SendAsync(MessageSerializer.SerializeToString(request));
     }
 
-    private void StartRelayProbeLoop()
-    {
-        if (_options.Role != PeerConnectionRole.Extranet || !_options.EnableRelayFallback)
-        {
-            return;
-        }
-
-        _relayProbeCts?.Cancel();
-        _relayProbeCts?.Dispose();
-        _relayProbeCts = new CancellationTokenSource();
-        var token = _relayProbeCts.Token;
-
-        _ = Task.Run(async () =>
-        {
-            while (!token.IsCancellationRequested && Mode == PeerTransportMode.Relay)
-            {
-                try
-                {
-                    await Task.Delay(TimeSpan.FromSeconds(30), token);
-                    if (token.IsCancellationRequested || Mode != PeerTransportMode.Relay)
-                    {
-                        break;
-                    }
-
-                    OnStatusChanged?.Invoke("Relay is active. Probing whether P2P can be restored...");
-                    await RequestConnectionAsync(force: true);
-                }
-                catch (OperationCanceledException)
-                {
-                    break;
-                }
-                catch (Exception ex)
-                {
-                    OnStatusChanged?.Invoke($"P2P restore probe failed: {ex.Message}");
-                }
-            }
-        }, token);
-    }
-
     private void StartLanDiscoveryBroadcast()
     {
-        var puncher = GetHolePuncher();
+        var puncher = _punch.GetHolePuncher();
         if (puncher == null) return;
 
         var clientPort = puncher.LocalEndPoint?.Port ?? 0;
@@ -748,58 +474,17 @@ public sealed class ConnectionNegotiator : IDisposable, ISignalingHandler
         });
     }
 
-    private async Task BeginHolePunchFromSignalAsync(
-        string sessionId,
-        string? target,
-        string? targetV6,
-        uint conv,
-        StunNatType targetNatType,
-        string statusFormat)
-    {
-        if (string.IsNullOrWhiteSpace(target) && string.IsNullOrWhiteSpace(targetV6))
-        {
-            OnStatusChanged?.Invoke("No remote UDP endpoint available. Falling back to relay...");
-            await RequestRelayIfAllowedAsync();
-            return;
-        }
-
-        var targetEp = TryParseEndPoint(target);
-        var targetEpV6 = TryParseEndPoint(targetV6);
-        var displayTarget = targetEpV6 != null ? $"{targetEp} / {targetEpV6}" : targetEp?.ToString() ?? string.Empty;
-        OnStatusChanged?.Invoke(string.Format(statusFormat, displayTarget));
-
-        await StartHolePunchAsync(
-            sessionId,
-            conv,
-            targetEp,
-            targetEpV6,
-            allowRelayFallback: _options.Role == PeerConnectionRole.Extranet,
-            targetNatType);
-    }
-
-    private static IPEndPoint? TryParseEndPoint(string? value)
-    {
-        if (!string.IsNullOrWhiteSpace(value) && IPEndPoint.TryParse(value, out var parsed))
-        {
-            return parsed;
-        }
-
-        return null;
-    }
-
     public void Dispose()
     {
         try { _cts.Cancel(); } catch { }
         try { _cts.Dispose(); } catch { }
         _connectionRequestLock.Dispose();
-        _relayProbeCts?.Cancel();
-        _relayProbeCts?.Dispose();
+        _punch.Dispose();
 
         if (_ownsSharedStacks)
         {
             // Standalone mode: we own all resources
             _signalingConnectionLoop.Dispose();
-            _holePuncher?.Dispose();
             _lanDiscovery?.Dispose();
         }
         else
@@ -825,7 +510,7 @@ public sealed class ConnectionNegotiator : IDisposable, ISignalingHandler
         {
             await RegisterNodeAsync();
             OnStatusChanged?.Invoke("Ready");
-            StartNatKeepAliveLoop();
+            _punch.StartNatKeepAliveLoop(_cts.Token);
         }
         else
         {
@@ -841,8 +526,8 @@ public sealed class ConnectionNegotiator : IDisposable, ISignalingHandler
         var sessionStats = _sessions.GetStatsSnapshot();
         return new NegotiatorStats(
             _sessions.Mode,
-            _natDetection?.NatType.ToString() ?? "Unknown",
-            _publicEndPoint?.ToString(),
+            _punch.NatDetection?.NatType.ToString() ?? "Unknown",
+            _punch.PublicEndPoint?.ToString(),
             IsSignalingConnected,
             _sessions.SessionCount,
             _options.TargetNodeId,
