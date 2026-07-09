@@ -1,0 +1,1 @@
+{"file": ".trellis/spec/backend/signaling-transport.md", "reason": "SignalingService 出站路由契约（SendToClientAsync 桥优先/客户端 clientId 一致性）——统一抽象不能破坏 WS/TCP 出站路由"}

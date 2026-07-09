@@ -1,0 +1,1 @@
+{"file": ".trellis/spec/backend/signaling-transport.md", "reason": "验证统一抽象后 TCP+WS 出站路由（bridge/TCP）、clientId 一致性、stale-node 清理仍正确"}
