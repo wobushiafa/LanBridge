@@ -71,3 +71,36 @@ Wired the already-implemented TokenBucket/PriorityFrameQueue/PeerTransportSessio
 ### Next Steps
 
 - None - task complete
+
+
+## Session 3: Add in-process integration test harness
+
+**Date**: 2026-07-09
+**Task**: Add in-process integration test harness
+**Branch**: `main`
+
+### Summary
+
+Built in-process integration test harness (SignalingTestCluster + TestClient) covering TCP/WS register roundtrip, auto fallback, coexistence, ConnectRequest/RelayRequest mediation, and rate-limit effective+ wiring. 8 new tests (64 total). Minimal product enablers: SignalingService.ActualPort + WebSocketSignalingService.bindAllNics param (defaults preserve production). Harness self-validated: caught a deliberately-injected && false unwire of SetRateLimit that the implement agent left in (removed). check sub-agent output was corrupted; I verified inline — 2 stable runs, no flakiness, no admin needed. localhost host-matching caveat for WS noted.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `d531389` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
