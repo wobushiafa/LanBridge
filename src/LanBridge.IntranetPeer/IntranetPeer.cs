@@ -567,7 +567,7 @@ public class IntranetPeer : IDisposable
         try
         {
             var bytes = frame.Encode();
-            await SendToExtranetAsync(sessionId, bytes, 0, bytes.Length);
+            await SendToExtranetHighPriorityAsync(sessionId, bytes, 0, bytes.Length);
         }
         catch (Exception ex)
         {
@@ -610,6 +610,11 @@ public class IntranetPeer : IDisposable
     public async Task SendToExtranetAsync(string sessionId, byte[] data, int offset, int length)
     {
         await _connection.SendAsync(sessionId, data, offset, length);
+    }
+
+    public Task SendToExtranetHighPriorityAsync(string sessionId, byte[] data, int offset, int length)
+    {
+        return _connection.SendHighPriorityAsync(sessionId, data, offset, length);
     }
 
     public async Task SendUnreliableToExtranetAsync(byte[] data, int offset, int length)

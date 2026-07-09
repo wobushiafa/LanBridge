@@ -103,10 +103,7 @@ public sealed class PeerTransportSession : IDisposable
     public async Task SendAsync(byte[] data, int offset, int length)
     {
         // 1. Token bucket rate limiting (zero overhead when not configured)
-        if (_tokenBucket != null && !_tokenBucket.TryConsume(length))
-        {
-            await _tokenBucket.WaitForTokensAsync(length, CancellationToken.None);
-        }
+        await ApplyRateLimitAsync(length, CancellationToken.None);
 
         // 2. Priority queue: only enqueue when there's already backlog
         //    (avoids queue overhead when there's no congestion)
@@ -119,6 +116,11 @@ public sealed class PeerTransportSession : IDisposable
 
         // 3. Direct send
         await SendCoreAsync(data, offset, length);
+    }
+
+    public Task SendHighPriorityAsync(byte[] data, int offset, int length)
+    {
+        return SendCoreAsync(data, offset, length);
     }
 
     /// <summary>

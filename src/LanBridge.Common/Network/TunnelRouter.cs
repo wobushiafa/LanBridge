@@ -151,6 +151,19 @@ public sealed class TunnelRouter : IDisposable
         await negotiator.SendAsync(data, offset, length);
     }
 
+    public async Task SendHighPriorityToRemoteAsync(int localPort, byte[] data, int offset, int length)
+    {
+        var negotiator = GetNegotiatorForLocalPort(localPort);
+        if (negotiator == null) return;
+
+        if (!negotiator.IsConnected)
+        {
+            _ = negotiator.EnsureConnectedAsync(TimeSpan.FromSeconds(15), CancellationToken.None);
+        }
+
+        await negotiator.SendHighPriorityAsync(data, offset, length);
+    }
+
     /// <summary>
     /// Sends unreliable (UDP) data to the appropriate tunnel.
     /// </summary>

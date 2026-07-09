@@ -295,6 +295,16 @@ public sealed class ConnectionNegotiator : IDisposable, ISignalingHandler
         await GetSession(sessionId).SendAsync(data, offset, length);
     }
 
+    public Task SendHighPriorityAsync(string sessionId, byte[] data, int offset, int length)
+    {
+        return GetSession(sessionId).SendHighPriorityAsync(data, offset, length);
+    }
+
+    public Task SendHighPriorityAsync(byte[] data, int offset, int length)
+    {
+        return SendHighPriorityAsync(_activeSessionId, data, offset, length);
+    }
+
     public async Task SendUnreliableAsync(byte[] data, int offset, int length)
     {
         await SendUnreliableAsync(_activeSessionId, data, offset, length);

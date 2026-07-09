@@ -656,7 +656,12 @@ public class ExtranetPeer : IDisposable
     private async Task SendTunnelFrameToRemoteAsync(int localPort, TunnelFrame frame)
     {
         var bytes = frame.Encode();
-        await SendToRemoteAsync(localPort, bytes, 0, bytes.Length);
+        await SendHighPriorityToRemoteAsync(localPort, bytes, 0, bytes.Length);
+    }
+
+    public async Task SendHighPriorityToRemoteAsync(int localPort, byte[] data, int offset, int length)
+    {
+        await _router.SendHighPriorityToRemoteAsync(localPort, data, offset, length);
     }
 
     public async Task SendToRemoteAsync(int localPort, byte[] data, int offset, int length)
