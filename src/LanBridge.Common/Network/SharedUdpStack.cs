@@ -51,14 +51,14 @@ public sealed class SharedUdpStack : IDisposable
     /// <summary>
     /// Starts the LAN discovery service. Called once by the first Negotiator that needs it.
     /// </summary>
-    public void StartLanDiscovery(ConnectionNegotiator negotiator)
+    public void StartLanDiscovery(ILanDiscoveryHost host)
     {
         if (_lanDiscovery != null)
         {
             return;
         }
 
-        _lanDiscovery = new LanDiscoveryService(_options.NodeId, negotiator, _options.Verbose);
+        _lanDiscovery = new LanDiscoveryService(_options.NodeId, host, _options.Verbose);
         _lanDiscovery.Start();
     }
 

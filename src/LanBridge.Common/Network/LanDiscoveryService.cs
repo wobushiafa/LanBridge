@@ -7,6 +7,12 @@ using System.Threading.Tasks;
 
 namespace LanBridge.Common.Network;
 
+public interface ILanDiscoveryHost
+{
+    Task HandleLanDiscoveryRequestAsync(IPEndPoint clientEndPoint, uint conv);
+    void RaiseStatusChanged(string status);
+}
+
 public sealed class LanDiscoveryService : IDisposable
 {
     private const int DiscoveryPort = 9005;
@@ -14,15 +20,15 @@ public sealed class LanDiscoveryService : IDisposable
     
     private readonly UdpClient _udpClient;
     private readonly string _nodeId;
-    private readonly ConnectionNegotiator _negotiator;
+    private readonly ILanDiscoveryHost _host;
     private readonly bool _verbose;
     private CancellationTokenSource? _cts;
     private Task? _listenTask;
 
-    public LanDiscoveryService(string nodeId, ConnectionNegotiator negotiator, bool verbose = false)
+    public LanDiscoveryService(string nodeId, ILanDiscoveryHost host, bool verbose = false)
     {
         _nodeId = nodeId;
-        _negotiator = negotiator;
+        _host = host;
         _verbose = verbose;
 
         _udpClient = new UdpClient();
@@ -69,7 +75,7 @@ public sealed class LanDiscoveryService : IDisposable
                             var clientEndPoint = new IPEndPoint(clientIp, clientPort);
                             
                             // Trigger the negotiator to reply with a unicast LB_ADVERTISE and setup direct LAN session
-                            await _negotiator.HandleLanDiscoveryRequestAsync(clientEndPoint, conv);
+                            await _host.HandleLanDiscoveryRequestAsync(clientEndPoint, conv);
                         }
                     }
                 }
@@ -82,7 +88,7 @@ public sealed class LanDiscoveryService : IDisposable
             {
                 if (_verbose)
                 {
-                    _negotiator.RaiseStatusChanged($"[LAN Discovery] Receive error: {ex.Message}");
+                    _host.RaiseStatusChanged($"[LAN Discovery] Receive error: {ex.Message}");
                 }
             }
         }
@@ -103,14 +109,14 @@ public sealed class LanDiscoveryService : IDisposable
             
             if (_verbose)
             {
-                _negotiator.RaiseStatusChanged($"[LAN Discovery] Sent query for target={targetNodeId}, clientPort={clientPort}, conv={conv}");
+                _host.RaiseStatusChanged($"[LAN Discovery] Sent query for target={targetNodeId}, clientPort={clientPort}, conv={conv}");
             }
         }
         catch (Exception ex)
         {
             if (_verbose)
             {
-                _negotiator.RaiseStatusChanged($"[LAN Discovery] Broadcast query failed: {ex.Message}");
+                _host.RaiseStatusChanged($"[LAN Discovery] Broadcast query failed: {ex.Message}");
             }
         }
     }

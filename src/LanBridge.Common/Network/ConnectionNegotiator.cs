@@ -33,7 +33,7 @@ public sealed record PeerConnectionOptions
     public FramePriority Priority { get; init; } = FramePriority.Normal;
 }
 
-public sealed class ConnectionNegotiator : IDisposable, ISignalingHandler
+public sealed class ConnectionNegotiator : IDisposable, ISignalingHandler, ILanDiscoveryHost
 {
     private readonly PeerConnectionOptions _options;
     private readonly PeerSessionManager _sessions;
