@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/backend/signaling-transport.md", "reason": "验证测试是否覆盖了 WS 出站路由、clientId 一致性、auto 回退等契约"}
+{"file": ".trellis/spec/backend/bandwidth-qos.md", "reason": "验证限速生效测试是否真正覆盖 SetRateLimit 接线"}

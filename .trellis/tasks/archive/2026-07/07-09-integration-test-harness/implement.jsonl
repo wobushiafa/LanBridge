@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/backend/signaling-transport.md", "reason": "信令传输契约：clientId 身份一致性、出站桥接路由、WS/TCP 帧格式——集成测试要验证这些接线"}
+{"file": ".trellis/spec/backend/bandwidth-qos.md", "reason": "限速/QoS 契约：SetRateLimit 接线点、per-session 桶、零开销默认——REQ-8 限速生效测试的依据"}
