@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 3
+- **Total Sessions**: 4
 - **Last Active**: 2026-07-09
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~106 | Active |
+| `journal-1.md` | ~139 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 4 | 2026-07-09 | ConnectionNegotiator split phase 1: extract data plane | `3a07bb2` | `main` |
 | 3 | 2026-07-09 | Add in-process integration test harness | `d531389` | `main` |
 | 2 | 2026-07-09 | Wire bandwidth rate-limit and QoS into runtime | `53021fd` | `main` |
 | 1 | 2026-07-08 | Wire WebSocket signaling end-to-end | `25011d5` | `main` |

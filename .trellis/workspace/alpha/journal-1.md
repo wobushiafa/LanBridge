@@ -104,3 +104,36 @@ Built in-process integration test harness (SignalingTestCluster + TestClient) co
 ### Next Steps
 
 - None - task complete
+
+
+## Session 4: ConnectionNegotiator split phase 1: extract data plane
+
+**Date**: 2026-07-09
+**Task**: ConnectionNegotiator split phase 1: extract data plane
+**Branch**: `main`
+
+### Summary
+
+Phase 1 of splitting the ConnectionNegotiator god class: extracted the data plane (session storage, GetSession factory with QoS wiring + events, reliable/high-priority send, session state, stats) into new PeerSessionManager (100 lines). ConnectionNegotiator (872->853 lines) now delegates; public API 100% unchanged, zero caller impact. One design deviation: GetStatsSnapshot stays on the facade (NegotiatorStats mixes data+control plane). SendUnreliableAsync stays (uses hole puncher, later phase). 64/64 tests pass incl integration suite (QoS wiring survived the move). Check sub-agent had corrupted last time so verified inline.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `3a07bb2` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
