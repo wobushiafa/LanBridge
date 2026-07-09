@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/backend/bandwidth-qos.md", "reason": "验证 GetSession 工厂搬迁后 SetRateLimit 接线仍完整（集成测试 Negotiator_WiresRateLimitFromConfig 覆盖）"}
+{"file": ".trellis/spec/backend/signaling-transport.md", "reason": "验证信令连接回调路径未受数据面搬迁影响"}

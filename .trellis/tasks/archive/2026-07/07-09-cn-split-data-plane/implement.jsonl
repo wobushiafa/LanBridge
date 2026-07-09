@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/backend/bandwidth-qos.md", "reason": "GetSession 工厂含 SetRateLimit/SetPriority 接线——搬迁必须保持该接线完整，spec 描述了接线点契约"}
+{"file": ".trellis/spec/backend/signaling-transport.md", "reason": "ConnectionNegotiator.HandleSignalingConnectedAsync 与 .Transport 的契约——数据面搬迁不能破坏信令连接回调路径"}
