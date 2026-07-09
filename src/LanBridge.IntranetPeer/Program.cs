@@ -170,7 +170,11 @@ public class Program
                 case "-v":
                     config.Verbose = true;
                     break;
-                
+
+                case "--tui":
+                    config.Transport.EnableTui = true;
+                    break;
+
                 case "--help":
                 case "-h":
                     PrintHelp();
@@ -319,6 +323,7 @@ public class Program
         Console.WriteLine("  --signaling-transport <tcp|ws|auto> Signaling transport (default: tcp)");
         Console.WriteLine("  --ws-port <port>                WebSocket signaling port (default: 9010)");
         Console.WriteLine("  --verbose, -v                   Enable detailed KCP diagnostics");
+        Console.WriteLine("  --tui                           Enable real-time TUI dashboard");
         Console.WriteLine("  --help, -h                      Show this help");
     }
 }

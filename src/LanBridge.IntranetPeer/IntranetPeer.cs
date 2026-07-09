@@ -4,8 +4,10 @@ using System.Net.Sockets;
 using System.Text;
 using System.Text.Json.Serialization;
 using LanBridge.Common.Configuration;
+using LanBridge.Common.Diagnostics;
 using LanBridge.Common.Network;
 using LanBridge.Common.Protocol;
+using LanBridge.Common.Tui;
 
 namespace LanBridge.IntranetPeer;
 
@@ -97,6 +99,8 @@ public class IntranetPeer : IDisposable
     private readonly ConcurrentDictionary<StreamKey, Task<TargetConnection>> _targetConnections = new();
     private readonly SemaphoreSlim _targetConnectionLock = new(1, 1);
     private readonly CancellationTokenSource _cts = new();
+    private readonly OperationalTelemetry _telemetry = new();
+    private TuiDashboard? _dashboard;
     private bool _isRunning;
 
     public event Action<string>? OnStatusChanged;
@@ -186,6 +190,18 @@ public class IntranetPeer : IDisposable
         {
             await _connection.StartAsync();
             StartUdpTargetCleaner();
+
+            // Start TUI dashboard if enabled
+            if (_config.Transport.EnableTui)
+            {
+                _dashboard = new TuiDashboard(
+                    _config.Identity.NodeId,
+                    "IntranetPeer",
+                    () => new[] { _connection.GetStatsSnapshot() },
+                    _telemetry.Snapshot);
+                _ = Task.Run(() => _dashboard.Run(_cts.Token), _cts.Token);
+            }
+            _telemetry.Increment("intranet_started");
 
             while (_isRunning)
             {
@@ -632,6 +648,7 @@ public class IntranetPeer : IDisposable
         _isRunning = false;
         _cts.Cancel();
         _cts.Dispose();
+        _dashboard?.Dispose();
         _connection.Dispose();
         CloseAllTargetConnections();
         _targetConnectionLock.Dispose();

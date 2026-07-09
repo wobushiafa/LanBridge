@@ -31,5 +31,11 @@ public sealed record NegotiatorStats(
     int ActiveSessionCount,
     string TargetNodeId,
     long RateLimitBytesPerSec,
-    double TokenBucketUtilization
+    double TokenBucketUtilization,
+    long RttMs,
+    uint Cwnd,
+    int WaitSnd,
+    long SentBytes,
+    long ReceivedBytes,
+    long InputErrors
 );

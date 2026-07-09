@@ -139,6 +139,9 @@ public class ExtranetPeer : IDisposable
     // TUI dashboard (optional)
     private TuiDashboard? _dashboard;
 
+    // Peer-side operational telemetry counters (surfaced in TUI).
+    private readonly OperationalTelemetry _telemetry = new();
+
     public event Action<string>? OnStatusChanged;
     public event Action<byte[], int>? OnDataReceived;
 
@@ -274,16 +277,12 @@ public class ExtranetPeer : IDisposable
             // Start TUI dashboard if enabled
             if (_config.Transport.EnableTui)
             {
-                var firstNegotiator = _router.Negotiators.Values.FirstOrDefault();
-                if (firstNegotiator != null)
-                {
-                    _dashboard = new TuiDashboard(
-                        _config.Identity.NodeId,
-                        "ExtranetPeer",
-                        () => firstNegotiator.GetStatsSnapshot(),
-                        () => new Dictionary<string, long>());
-                    _ = Task.Run(() => _dashboard.Run(_cts.Token), _cts.Token);
-                }
+                _dashboard = new TuiDashboard(
+                    _config.Identity.NodeId,
+                    "ExtranetPeer",
+                    () => _router.Negotiators.Values.Select(n => n.GetStatsSnapshot()).ToList(),
+                    _telemetry.Snapshot);
+                _ = Task.Run(() => _dashboard.Run(_cts.Token), _cts.Token);
             }
 
             while (_isRunning)
@@ -690,6 +689,7 @@ public class ExtranetPeer : IDisposable
     private void UpdateState(ConnectionState newState)
     {
         _state = newState;
+        _telemetry.Increment($"state_{newState.ToString().ToLowerInvariant()}");
         OnStatusChanged?.Invoke($"State: {newState}");
     }
 
@@ -698,6 +698,7 @@ public class ExtranetPeer : IDisposable
         _isRunning = false;
         _cts.Cancel();
         _cts.Dispose();
+        _dashboard?.Dispose();
         _router.Dispose();
 
         foreach (var proxy in _localProxies)

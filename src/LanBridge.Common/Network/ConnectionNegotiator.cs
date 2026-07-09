@@ -532,7 +532,13 @@ public sealed class ConnectionNegotiator : IDisposable, ISignalingHandler, ILanD
             _sessions.SessionCount,
             _options.TargetNodeId,
             sessionStats.RateLimitBytesPerSec,
-            sessionStats.TokenBucketUtilization
+            sessionStats.TokenBucketUtilization,
+            sessionStats.RttMs,
+            sessionStats.Cwnd,
+            sessionStats.WaitSnd,
+            sessionStats.SentBytes,
+            sessionStats.ReceivedBytes,
+            sessionStats.InputErrors
         );
     }
 }
