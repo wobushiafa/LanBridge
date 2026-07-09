@@ -13,12 +13,9 @@ public class SignalingService : IDisposable
     private readonly TcpListener _listener;
     private readonly ServerConfig _config;
     private readonly OperationalTelemetry _telemetry;
-    private readonly ConcurrentDictionary<string, TcpClient> _clients = new();
-    private readonly ConcurrentDictionary<string, NetworkStream> _streams = new();
-    private readonly ConcurrentDictionary<string, SemaphoreSlim> _sendLocks = new();
+    private readonly ConcurrentDictionary<string, ISignalingConnection> _connections = new();
     private readonly ConcurrentDictionary<string, NodeInfo> _nodes = new();
     private readonly ConcurrentDictionary<string, string> _clientToNode = new();
-    private readonly ConcurrentDictionary<string, TransportBridge> _transportBridges = new();
     private bool _isRunning;
 
     public event Action<string, BaseMessage>? OnMessageReceived;
@@ -31,42 +28,33 @@ public class SignalingService : IDisposable
     public int ActualPort => (_listener.LocalEndpoint as IPEndPoint)?.Port ?? 0;
 
     /// <summary>
-    /// Outbound channel for a non-TCP transport (e.g. WebSocket) keyed by clientId.
+    /// Registers a connection (any transport) keyed by clientId. Must be called with
+    /// the same clientId used for message processing. The TCP accept loop registers
+    /// a <see cref="TcpSignalingConnection"/>; non-TCP transports (WebSocket) register
+    /// a <see cref="BridgeSignalingConnection"/> here.
     /// </summary>
-    private sealed record TransportBridge(
-        Func<BaseMessage, CancellationToken, Task> SendAsync,
-        Func<Task> DisconnectAsync);
+    public void RegisterConnection(string clientId, ISignalingConnection conn)
+        => _connections[clientId] = conn;
 
     /// <summary>
-    /// Registers an outbound sender (and optional disconnect hook) for a transport
-    /// such as WebSocket. Must be called with the same clientId used for message
-    /// processing. TCP clients do not register here.
+    /// Removes a connection registration and clears its node binding. Called by
+    /// non-TCP transports on disconnect; mirrors the cleanup performed by the TCP
+    /// client handler's finally block.
     /// </summary>
-    public void RegisterTransportSender(
-        string clientId,
-        Func<BaseMessage, CancellationToken, Task> sender,
-        Func<Task>? disconnectAsync = null)
+    public void UnregisterConnection(string clientId)
     {
-        _transportBridges[clientId] = new TransportBridge(sender, disconnectAsync ?? (() => Task.CompletedTask));
+        _connections.TryRemove(clientId, out _);
+        RemoveNodeBinding(clientId);
     }
 
     /// <summary>
-    /// Removes a transport sender registration. Node/client bookkeeping is handled
-    /// by <see cref="OnTransportClientDisconnected"/>.
+    /// Clears the clientId→nodeId binding (if any) and reports the disconnect.
+    /// Idempotent: the <c>TryRemove</c> guards ensure single-fire telemetry even when
+    /// both <see cref="DisconnectClientAsync"/> (reject path) and the receive loop's
+    /// finally run. Called by <see cref="UnregisterConnection"/> and the TCP finally.
     /// </summary>
-    public void UnregisterTransportSender(string clientId)
+    private void RemoveNodeBinding(string clientId)
     {
-        _transportBridges.TryRemove(clientId, out _);
-    }
-
-    /// <summary>
-    /// Called by non-TCP transports when a client disconnects. Mirrors the cleanup
-    /// performed by the TCP client handler's finally block.
-    /// </summary>
-    public void OnTransportClientDisconnected(string clientId)
-    {
-        _transportBridges.TryRemove(clientId, out _);
-
         if (_clientToNode.TryRemove(clientId, out var nodeId))
         {
             _nodes.TryRemove(nodeId, out _);
@@ -84,7 +72,7 @@ public class SignalingService : IDisposable
     /// </summary>
     public async Task ProcessMessageFromTransportAsync(string clientId, BaseMessage message)
     {
-        await ProcessMessageAsync(clientId, message, null!);
+        await ProcessMessageAsync(clientId, message);
     }
 
     public SignalingService(ServerConfig config, OperationalTelemetry telemetry)
@@ -106,12 +94,11 @@ public class SignalingService : IDisposable
             {
                 var client = await _listener.AcceptTcpClientAsync();
                 var clientId = Guid.NewGuid().ToString("N")[..8];
-                _clients[clientId] = client;
-                _streams[clientId] = client.GetStream();
-                _sendLocks[clientId] = new SemaphoreSlim(1, 1);
+                var conn = new TcpSignalingConnection(client);
+                _connections[clientId] = conn;
                 _telemetry.Increment("signaling_clients_connected");
                 ConsoleStatusWriter.WriteServerStatus("Signaling", $"Client connected: {clientId}", ConsoleColor.Gray);
-                _ = Task.Run(() => HandleClientAsync(clientId, client));
+                _ = Task.Run(() => HandleClientAsync(clientId, conn));
             }
             catch (Exception) when (!_isRunning)
             {
@@ -124,14 +111,14 @@ public class SignalingService : IDisposable
         }
     }
 
-    private async Task HandleClientAsync(string clientId, TcpClient client)
+    private async Task HandleClientAsync(string clientId, TcpSignalingConnection conn)
     {
         var buffer = new byte[65536];
+        var stream = conn.Stream;
 
         try
         {
-            var stream = client.GetStream();
-            while (client.Connected && _isRunning)
+            while (conn.Connected && _isRunning)
             {
                 var lengthBuffer = new byte[4];
                 int bytesRead = 0;
@@ -177,7 +164,7 @@ public class SignalingService : IDisposable
                 }
 
                 OnMessageReceived?.Invoke(clientId, baseMessage);
-                await ProcessMessageAsync(clientId, baseMessage, client);
+                await ProcessMessageAsync(clientId, baseMessage);
             }
         }
         catch (Exception ex)
@@ -186,32 +173,18 @@ public class SignalingService : IDisposable
         }
         finally
         {
-            _clients.TryRemove(clientId, out _);
-            _streams.TryRemove(clientId, out _);
-            if (_sendLocks.TryRemove(clientId, out var sendLock))
-            {
-                sendLock.Dispose();
-            }
-
-            if (_clientToNode.TryRemove(clientId, out var nodeId))
-            {
-                _nodes.TryRemove(nodeId, out _);
-                _telemetry.Increment("signaling_nodes_unregistered");
-                ConsoleStatusWriter.WriteServerStatus("Signaling", $"Node unregistered: {nodeId}", ConsoleColor.DarkYellow);
-            }
-
-            client.Dispose();
-            _telemetry.Increment("signaling_clients_disconnected");
-            ConsoleStatusWriter.WriteServerStatus("Signaling", $"Client disconnected: {clientId}", ConsoleColor.Gray);
+            _connections.TryRemove(clientId, out _);
+            conn.Dispose();
+            RemoveNodeBinding(clientId);
         }
     }
 
-    private async Task ProcessMessageAsync(string clientId, BaseMessage message, TcpClient client)
+    private async Task ProcessMessageAsync(string clientId, BaseMessage message)
     {
         switch (message.Type)
         {
             case MessageType.Register:
-                await HandleRegisterAsync(clientId, (RegisterMessage)message, client);
+                await HandleRegisterAsync(clientId, (RegisterMessage)message);
                 break;
             case MessageType.ConnectRequest:
                 await HandleConnectRequestAsync(clientId, (ConnectRequest)message);
@@ -225,7 +198,7 @@ public class SignalingService : IDisposable
         }
     }
 
-    private async Task HandleRegisterAsync(string clientId, RegisterMessage message, TcpClient client)
+    private async Task HandleRegisterAsync(string clientId, RegisterMessage message)
     {
         if (!ValidateRegistrationToken(message.Token))
         {
@@ -237,7 +210,7 @@ public class SignalingService : IDisposable
             };
             await SendToClientAsync(clientId, ack);
             ConsoleStatusWriter.WriteServerStatus("Signaling", $"Rejected node registration for {message.NodeId}", ConsoleColor.Red);
-            await DisconnectClientAsync(clientId, client);
+            await DisconnectClientAsync(clientId);
             return;
         }
 
@@ -386,40 +359,18 @@ public class SignalingService : IDisposable
 
     public async Task SendToClientAsync(string clientId, BaseMessage message)
     {
-        if (_transportBridges.TryGetValue(clientId, out var bridge))
-        {
-            try
-            {
-                await bridge.SendAsync(message, CancellationToken.None);
-            }
-            catch (Exception ex)
-            {
-                ConsoleStatusWriter.WriteServerStatus("Signaling", $"Send error to {clientId}: {ex.Message}", ConsoleColor.Red);
-            }
-            return;
-        }
-
-        if (!_streams.TryGetValue(clientId, out var stream) || !_sendLocks.TryGetValue(clientId, out var sendLock))
+        if (!_connections.TryGetValue(clientId, out var conn))
         {
             return;
         }
 
-        await sendLock.WaitAsync();
         try
         {
-            var data = Encoding.UTF8.GetBytes(MessageSerializer.SerializeToString(message));
-            var lengthBytes = BitConverter.GetBytes(data.Length);
-            await stream.WriteAsync(lengthBytes, 0, 4);
-            await stream.WriteAsync(data, 0, data.Length);
-            await stream.FlushAsync();
+            await conn.SendAsync(message, CancellationToken.None);
         }
         catch (Exception ex)
         {
             ConsoleStatusWriter.WriteServerStatus("Signaling", $"Send error to {clientId}: {ex.Message}", ConsoleColor.Red);
-        }
-        finally
-        {
-            sendLock.Release();
         }
     }
 
@@ -434,26 +385,24 @@ public class SignalingService : IDisposable
     }
 
     /// <summary>
-    /// Transport-agnostic disconnect. For non-TCP clients (registered via
-    /// <see cref="RegisterTransportSender"/>), invokes the transport's disconnect
-    /// hook so its receive loop exits and cleans up. For TCP clients, disposes the
-    /// socket so the TCP receive loop exits and runs its finally cleanup.
+    /// Transport-agnostic disconnect. Removes the connection from the registry and
+    /// closes it so its receive loop exits and runs the finally cleanup (which fires
+    /// the disconnect telemetry / node-binding removal). Does NOT do node cleanup
+    /// here — the receive-loop finally (TCP) or <see cref="UnregisterConnection"/>
+    /// (WS) does that, mirroring the pre-refactor single-fire semantics.
     /// </summary>
-    private async Task DisconnectClientAsync(string clientId, TcpClient? tcpClient)
+    private async Task DisconnectClientAsync(string clientId)
     {
-        if (_transportBridges.TryRemove(clientId, out var bridge))
+        if (_connections.TryRemove(clientId, out var conn))
         {
             try
             {
-                await bridge.DisconnectAsync();
+                await conn.DisconnectAsync();
             }
             catch
             {
             }
-            return;
         }
-
-        tcpClient?.Dispose();
     }
 
     public void Dispose()
@@ -461,21 +410,16 @@ public class SignalingService : IDisposable
         _isRunning = false;
         _listener.Stop();
 
-        foreach (var client in _clients.Values)
+        foreach (var conn in _connections.Values)
         {
-            client.Dispose();
+            if (conn is IDisposable disposable)
+            {
+                disposable.Dispose();
+            }
         }
 
-        foreach (var sendLock in _sendLocks.Values)
-        {
-            sendLock.Dispose();
-        }
-
-        _clients.Clear();
-        _streams.Clear();
-        _sendLocks.Clear();
+        _connections.Clear();
         _nodes.Clear();
         _clientToNode.Clear();
-        _transportBridges.Clear();
     }
 }

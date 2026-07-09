@@ -64,12 +64,13 @@ public sealed class WebSocketSignalingService : IDisposable
                 var ws = wsContext.WebSocket;
                 _clients[clientId] = ws;
 
-                _signalingService.RegisterTransportSender(
+                _signalingService.RegisterConnection(
                     clientId,
-                    (msg, _) => SendToClientAsync(clientId, msg),
-                    () => ws.State == WebSocketState.Open
-                        ? ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "Server disconnect", CancellationToken.None)
-                        : Task.CompletedTask);
+                    new BridgeSignalingConnection(
+                        (msg, _) => SendToClientAsync(clientId, msg),
+                        () => ws.State == WebSocketState.Open
+                            ? ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "Server disconnect", CancellationToken.None)
+                            : Task.CompletedTask));
 
                 ConsoleStatusWriter.WriteServerStatus("WebSocket", $"Client connected: {clientId}", ConsoleColor.Gray);
                 _ = Task.Run(() => HandleClientAsync(clientId, ws, ct), ct);
@@ -129,7 +130,7 @@ public sealed class WebSocketSignalingService : IDisposable
         }
         finally
         {
-            _signalingService.OnTransportClientDisconnected(clientId);
+            _signalingService.UnregisterConnection(clientId);
             _clients.TryRemove(clientId, out _);
 
             try
