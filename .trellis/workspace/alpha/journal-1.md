@@ -170,3 +170,36 @@ Phase 2: extracted NAT/hole-punch subsystem into PeerPunchCoordinator (468 lines
 ### Next Steps
 
 - None - task complete
+
+
+## Session 6: Add P2P/KCP data-path integration tests
+
+**Date**: 2026-07-09
+**Task**: Add P2P/KCP data-path integration tests
+**Branch**: `main`
+
+### Summary
+
+Added 4 loopback integration tests for the KCP data path (previously zero coverage — highest-risk untested path). KcpLoopbackPair helper + KcpDataPathTests (REQ-1 KCP roundtrip, REQ-2 PeerTransportSession+KCP, REQ-3 rate-limit on real P2P path, REQ-4 fragmentation/reassembly). 68/68 tests pass two runs. Zero product changes. Discovered product limitation: KcpSession.InputPacket 64KB buffer caps deliverable message size (REQ-4 used 60000 bytes). Double-dispose wrinkle handled via tolerant TryDisposeSession.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `45d134b` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
