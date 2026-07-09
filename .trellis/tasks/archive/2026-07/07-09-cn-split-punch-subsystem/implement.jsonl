@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/backend/signaling-transport.md", "reason": "打洞/relay 由信令 handler 触发——coordinator 抽取不能破坏 HandleConnectReady/HolePunchStart/RelayAccept 与 BeginHolePunch/UseP2p 的路径"}
+{"file": ".trellis/spec/backend/bandwidth-qos.md", "reason": "SendUnreliableAsync 迁移到 coordinator 后仍须调 session.ApplyRateLimitAsync（D4）——不能丢 UDP 限速"}

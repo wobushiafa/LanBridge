@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/backend/signaling-transport.md", "reason": "验证打洞/relay 信令路径未受 coordinator 抽取影响"}
+{"file": ".trellis/spec/backend/bandwidth-qos.md", "reason": "验证 SendUnreliableAsync 迁移后 UDP 限速（D4）仍生效"}
