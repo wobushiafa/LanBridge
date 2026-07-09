@@ -3,6 +3,7 @@ using System.Net;
 using System.Net.WebSockets;
 using System.Text;
 using LanBridge.Common.Protocol;
+using LanBridge.Common.Runtime;
 
 namespace LanBridge.SignalingServer;
 
@@ -29,7 +30,7 @@ public sealed class WebSocketSignalingService : IDisposable
     {
         _isRunning = true;
         _listener.Start();
-        Console.WriteLine($"[WebSocket] Listening on port {_listener.Prefixes.First()}");
+        ConsoleStatusWriter.WriteServerStatus("WebSocket", $"Listening on {_listener.Prefixes.First()}", ConsoleColor.Gray);
 
         while (_isRunning && !ct.IsCancellationRequested)
         {
@@ -56,7 +57,7 @@ public sealed class WebSocketSignalingService : IDisposable
                         ? ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "Server disconnect", CancellationToken.None)
                         : Task.CompletedTask);
 
-                Console.WriteLine($"[WebSocket] Client connected: {clientId}");
+                ConsoleStatusWriter.WriteServerStatus("WebSocket", $"Client connected: {clientId}", ConsoleColor.Gray);
                 _ = Task.Run(() => HandleClientAsync(clientId, ws, ct), ct);
             }
             catch (Exception) when (!_isRunning)
@@ -69,7 +70,7 @@ public sealed class WebSocketSignalingService : IDisposable
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[WebSocket] Accept error: {ex.Message}");
+                ConsoleStatusWriter.WriteServerStatus("WebSocket", $"Accept error: {ex.Message}", ConsoleColor.Red);
             }
         }
     }
@@ -106,11 +107,11 @@ public sealed class WebSocketSignalingService : IDisposable
         }
         catch (WebSocketException ex)
         {
-            Console.WriteLine($"[WebSocket] Client {clientId} error: {ex.Message}");
+            ConsoleStatusWriter.WriteServerStatus("WebSocket", $"Client {clientId} error: {ex.Message}", ConsoleColor.Red);
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[WebSocket] Client {clientId} error: {ex.Message}");
+            ConsoleStatusWriter.WriteServerStatus("WebSocket", $"Client {clientId} error: {ex.Message}", ConsoleColor.Red);
         }
         finally
         {
@@ -129,7 +130,7 @@ public sealed class WebSocketSignalingService : IDisposable
             }
 
             ws.Dispose();
-            Console.WriteLine($"[WebSocket] Client disconnected: {clientId}");
+            ConsoleStatusWriter.WriteServerStatus("WebSocket", $"Client disconnected: {clientId}", ConsoleColor.Gray);
         }
     }
 
@@ -148,7 +149,7 @@ public sealed class WebSocketSignalingService : IDisposable
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[WebSocket] Send error to {clientId}: {ex.Message}");
+            ConsoleStatusWriter.WriteServerStatus("WebSocket", $"Send error to {clientId}: {ex.Message}", ConsoleColor.Red);
         }
     }
 

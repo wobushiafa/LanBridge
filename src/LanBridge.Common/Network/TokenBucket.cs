@@ -12,7 +12,6 @@ public sealed class TokenBucket
     private readonly long _burstCapacity;     // max accumulated tokens
     private long _tokens;                     // current available tokens (fixed-point: multiplied by 1000)
     private long _lastRefillTimestamp;         // Stopwatch.GetTimestamp() at last refill
-    private readonly SemaphoreSlim _waitSignal = new(1, 1);
 
     private const int Scale = 1000; // Fixed-point scale factor
 

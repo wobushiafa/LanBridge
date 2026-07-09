@@ -108,7 +108,7 @@ public sealed class SignalingConnectionLoop : IDisposable
             client.OnError += error => _statusSink?.Invoke($"Signaling error: {error}");
 
             _transport = client;
-            await client.ConnectAsync();
+            await client.ConnectAsync().WaitAsync(TimeSpan.FromSeconds(5), cancellationToken);
             _statusSink?.Invoke("Connected to signaling server (TCP)");
             await _onConnectedAsync(client);
             return true;
@@ -137,7 +137,7 @@ public sealed class SignalingConnectionLoop : IDisposable
             client.OnError += error => _statusSink?.Invoke($"WebSocket signaling error: {error}");
 
             _transport = client;
-            await client.ConnectAsync();
+            await client.ConnectAsync().WaitAsync(TimeSpan.FromSeconds(5), cancellationToken);
             _statusSink?.Invoke("Connected to signaling server (WebSocket)");
             await _onConnectedAsync(client);
             return true;
