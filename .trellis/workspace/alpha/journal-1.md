@@ -137,3 +137,36 @@ Phase 1 of splitting the ConnectionNegotiator god class: extracted the data plan
 ### Next Steps
 
 - None - task complete
+
+
+## Session 5: ConnectionNegotiator split phase 2: extract NAT/punch subsystem
+
+**Date**: 2026-07-09
+**Task**: ConnectionNegotiator split phase 2: extract NAT/punch subsystem
+**Branch**: `main`
+
+### Summary
+
+Phase 2: extracted NAT/hole-punch subsystem into PeerPunchCoordinator (468 lines). ConnectionNegotiator 853->538 lines (-37%). Decoupled via 3 events OUT + 8 callback delegates IN + PeerSessionManager (no negotiator ref -> no cycle). SendUnreliableAsync migrated (D4 preserved). _lanDiscovery stays in negotiator (LanDiscoveryService circular dep). 6 deviations from design, all mechanical. 64/64 tests pass two runs, zero caller impact. Verified inline (check sub-agent had corrupted previously).
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `9f9917b` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
