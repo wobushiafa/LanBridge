@@ -1,0 +1,31 @@
+{
+  "id": "p3-feature-enhancements",
+  "name": "p3-feature-enhancements",
+  "title": "P3 功能增强：多隧道多目标、带宽QoS、统计TUI、WebSocket信令",
+  "description": "P3阶段功能增强，包含4个独立子特性：13-多隧道多目标、14-带宽限制QoS、15-连接统计TUI面板、16-WebSocket信令传输",
+  "status": "completed",
+  "dev_type": null,
+  "scope": null,
+  "package": null,
+  "priority": "P1",
+  "creator": "alpha",
+  "assignee": "alpha",
+  "createdAt": "2026-07-08",
+  "completedAt": "2026-07-09",
+  "branch": null,
+  "base_branch": "main",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [
+    "07-08-multi-tunnel-multi-target",
+    "07-08-bandwidth-limit-qos",
+    "07-08-stats-tui-dashboard",
+    "07-08-websocket-signaling"
+  ],
+  "parent": null,
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {}
+}
