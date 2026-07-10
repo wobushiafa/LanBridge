@@ -89,15 +89,18 @@ public sealed class WebSocketSignalingClient : SignalingTransportBase
     {
         try
         {
-            if (_ws?.State == WebSocketState.Open)
+            if (_ws is { } ws)
             {
-                _ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "Disposing", CancellationToken.None).GetAwaiter().GetResult();
+                if (ws.State is WebSocketState.Open or WebSocketState.CloseReceived or WebSocketState.CloseSent)
+                {
+                    ws.Abort();
+                }
+
+                ws.Dispose();
             }
         }
         catch
         {
         }
-
-        _ws?.Dispose();
     }
 }

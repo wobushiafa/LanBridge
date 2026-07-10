@@ -153,6 +153,67 @@ public class ConfigurationTests
     }
 
     [Fact]
+    public void ClientConfig_Validate_RejectsBadSignalingTransport()
+    {
+        var config = new ClientConfig
+        {
+            NodeId = "extranet-1",
+            TargetNodeId = "intranet-1",
+            SignalingServerHost = "signal.example.com",
+            SignalingServerPort = 9000,
+            StunServerHost = "stun.example.com",
+            StunServerPort = 9001,
+            StunAlternateServerPort = 9003,
+            HolePunchTimeoutMs = 10000,
+            SignalingTransport = "quic",
+            Mappings =
+            {
+                new TunnelMapping
+                {
+                    LocalPort = 8554,
+                    TargetHost = "192.168.1.10",
+                    TargetPort = 554,
+                    Protocol = "tcp"
+                }
+            }
+        };
+
+        var ex = Assert.Throws<InvalidOperationException>(() => config.Validate());
+        Assert.Contains("tcp, ws, or auto", ex.Message);
+    }
+
+    [Fact]
+    public void ClientConfig_Validate_RequiresWebSocketPortForWsTransport()
+    {
+        var config = new ClientConfig
+        {
+            NodeId = "extranet-1",
+            TargetNodeId = "intranet-1",
+            SignalingServerHost = "signal.example.com",
+            SignalingServerPort = 9000,
+            StunServerHost = "stun.example.com",
+            StunServerPort = 9001,
+            StunAlternateServerPort = 9003,
+            HolePunchTimeoutMs = 10000,
+            SignalingTransport = "ws",
+            SignalingWsPort = 0,
+            Mappings =
+            {
+                new TunnelMapping
+                {
+                    LocalPort = 8554,
+                    TargetHost = "192.168.1.10",
+                    TargetPort = 554,
+                    Protocol = "tcp"
+                }
+            }
+        };
+
+        var ex = Assert.Throws<InvalidOperationException>(() => config.Validate());
+        Assert.Contains("ws or auto", ex.Message);
+    }
+
+    [Fact]
     public void PeerConfig_GroupedViews_StayInSyncWithFlatProperties()
     {
         var config = new PeerConfig
@@ -239,6 +300,63 @@ public class ConfigurationTests
         };
 
         Assert.Throws<InvalidOperationException>(() => config.Validate());
+    }
+
+    [Fact]
+    public void PeerConfig_Validate_RejectsBadSignalingTransport()
+    {
+        var config = new PeerConfig
+        {
+            NodeId = "intranet-1",
+            SignalingServerHost = "signal.example.com",
+            SignalingServerPort = 9000,
+            StunServerHost = "stun.example.com",
+            StunServerPort = 9001,
+            StunAlternateServerPort = 9003,
+            TargetSourceHost = "192.168.1.10",
+            TargetSourcePort = 554,
+            SignalingTransport = "http3"
+        };
+
+        var ex = Assert.Throws<InvalidOperationException>(() => config.Validate());
+        Assert.Contains("tcp, ws, or auto", ex.Message);
+    }
+
+    [Fact]
+    public void PeerConfig_Validate_RequiresWebSocketPortForAutoTransport()
+    {
+        var config = new PeerConfig
+        {
+            NodeId = "intranet-1",
+            SignalingServerHost = "signal.example.com",
+            SignalingServerPort = 9000,
+            StunServerHost = "stun.example.com",
+            StunServerPort = 9001,
+            StunAlternateServerPort = 9003,
+            TargetSourceHost = "192.168.1.10",
+            TargetSourcePort = 554,
+            SignalingTransport = "auto",
+            SignalingWsPort = 70000
+        };
+
+        var ex = Assert.Throws<InvalidOperationException>(() => config.Validate());
+        Assert.Contains("ws or auto", ex.Message);
+    }
+
+    [Fact]
+    public void SignalingConnectionLoop_RejectsUnsupportedTransport()
+    {
+        var ex = Assert.Throws<InvalidOperationException>(() => new LanBridge.Common.Network.SignalingConnectionLoop(
+            "127.0.0.1",
+            9000,
+            statusSink: null,
+            onDisconnected: null,
+            onMessageAsync: _ => Task.CompletedTask,
+            onConnectedAsync: _ => Task.CompletedTask,
+            transportType: "bogus",
+            wsPort: 9010));
+
+        Assert.Contains("tcp, ws, or auto", ex.Message);
     }
 
     [Fact]

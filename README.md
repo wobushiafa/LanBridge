@@ -33,10 +33,10 @@
 - 🤝 **首包零丢失竞态防护**：使用 Task 驱动的异步状态同步结构保护内网目标连接，彻底消除 UDP/KCP 穿透初期的异步数据包到达竞争，实现首包 100% 成功交付。
 - 🔁 **信令自动重连与高可用容灾**：客户端内置后台连接管理器。当信令服务器在启动时离线时，客户端会自动以 5 秒周期进行重试而不会闪退；在运行期如果遭遇信令断连，客户端也能即时捕获，并在信令服务器恢复后自动重建连接并重新注册，保障隧道在无人值守环境下的绝对稳定性。
 - 🔗 **P2P 优先与自动中继后备**：优先尝试打洞建立 P2P UDP 直连；在 NAT 条件极差（如双侧对称 NAT）时，秒级无缝降级到 **Relay 中继模式**。
-- 🖥️ **实时 TUI 统计仪表盘**：ExtranetPeer 支持 `--tui` / `--dashboard` 启动参数，运行时在终端实时展示传输模式、连接状态、带宽速率、KCP 统计等关键指标，适合运维监控和调试。
+- 🖥️ **实时 TUI 统计仪表盘**：ExtranetPeer 与 IntranetPeer 都支持 TUI 统计视图；ExtranetPeer 可使用 `--tui` / `--dashboard`，IntranetPeer 可使用 `--tui`，运行时在终端实时展示传输模式、连接状态、带宽速率、KCP 统计等关键指标。
 - 🔀 **多隧道多目标路由**：单台 ExtranetPeer 可同时连接多个 IntranetPeer 节点。通过映射中 `@nodeId` 后缀（如 `8554=192.168.7.230:554:tcp@peer-001`）指定每个端口转发到不同的内网节点，内部由 `TunnelRouter` 管理共享 UDP 栈和信令栈。
-- 🚧 **WebSocket 信令传输通道** *(开发中)*：在传统 TCP 信令连接基础上，新增 WebSocket 传输选项，适用于受限于 HTTP 代理或防火墙仅允许出站 WebSocket 的网络环境。支持 `auto` 模式自动回退（先 TCP → 失败后 WS）。客户端与服务端代码已实现，CLI 参数与服务端启动集成待完成。
-- 🚧 **带宽限速与 QoS 优先级** *(开发中)*：每个端口映射可独立配置 `rateLimitBytesPerSec`（字节/秒上限，0 = 不限速）和 `priority`（`high` / `normal` / `low`），确保关键实时流量优先于后台大流量传输。数据模型、令牌桶与优先级队列已实现，运行时接入待完成。
+- 🌐 **WebSocket 信令传输通道**：在传统 TCP 信令连接基础上，支持通过 `--signaling-transport tcp|ws|auto` 选择 WebSocket 信令；`auto` 模式会先尝试 TCP，失败后自动回退到 WS，适用于受限于 HTTP 代理或仅允许出站 WebSocket 的网络环境。
+- 📊 **带宽限速与 QoS 优先级**：每个端口映射可独立配置 `rateLimitBytesPerSec`（字节/秒上限，0 = 不限速）和 `priority`（`high` / `normal` / `low`）。运行时会按目标节点聚合为实际会话 QoS，限制带宽并影响发送优先级。
 
 ---
 
@@ -173,6 +173,9 @@ dotnet run --project src/LanBridge.IntranetPeer -- \
 | `--allow-target` | `-at` | 允许的目标 `host[:port\|:*]` | — |
 | `--allow-subnet` | — | 允许的子网 `cidr[:port]` | — |
 | `--udp-port` | `-up` | P2P UDP 端口 | 随机 |
+| `--signaling-transport` | — | 信令传输 `tcp` / `ws` / `auto` | `tcp` |
+| `--ws-port` | — | WebSocket 信令端口 | `9010` |
+| `--tui` | — | 启用 TUI 实时仪表盘 | `false` |
 | `--verbose` | `-v` | 详细 KCP 诊断 | `false` |
 
 ---
@@ -224,6 +227,10 @@ dotnet run --project src/LanBridge.ExtranetPeer -- \
 | `--udp-port` | `-up` | P2P UDP 端口 | 随机 |
 | `--punch-timeout` | `-pt` | 打洞超时 (ms) | `10000` |
 | `--no-relay` | — | 禁用中继后备 | — |
+| `--rate-limit` | — | 为最近一个 `--map` 设置限速（字节/秒） | `0` |
+| `--priority` | — | 为最近一个 `--map` 设置优先级 `high/normal/low` | 协议自动推导 |
+| `--signaling-transport` | — | 信令传输 `tcp` / `ws` / `auto` | `tcp` |
+| `--ws-port` | — | WebSocket 信令端口 | `9010` |
 | `--tui` / `--dashboard` | — | 启用 TUI 实时仪表盘 | `false` |
 | `--verbose` | `-v` | 详细 KCP 诊断 | `false` |
 
@@ -254,7 +261,7 @@ dotnet run --project src/LanBridge.ExtranetPeer -- \
 * `Stun`：`stunServerHost`、`stunServerPort`、`stunAlternateServerPort`
 * `Connection`：`targetNodeId`、`holePunchTimeoutMs`、`enableRelayFallback`
 * `Proxy`：`localProxyPort`、`mappings`
-* `Transport`：`udpPort`、`verbose`、`enableKcpCongestionControl`、`enableTui`
+* `Transport`：`udpPort`、`verbose`、`enableKcpCongestionControl`、`enableTui`、`signalingTransport`、`signalingWsPort`
 
 映射条目 (`mappings[]`) 额外支持：
 * `targetNodeId`：指定该映射路由到哪个内网节点（覆盖全局 `--target-node`）
@@ -267,12 +274,12 @@ dotnet run --project src/LanBridge.ExtranetPeer -- \
 * `Signaling`：`signalingServerHost`、`signalingServerPort`
 * `Stun`：`stunServerHost`、`stunServerPort`、`stunAlternateServerPort`
 * `Target`：`targetSourceHost`、`targetSourcePort`
-* `Transport`：`udpPort`、`verbose`、`enableKcpCongestionControl`
+* `Transport`：`udpPort`、`verbose`、`enableKcpCongestionControl`、`enableTui`、`signalingTransport`、`signalingWsPort`
 * `Access Control`：`allowedTargets`、`allowedSubnets`
 
 `SignalingServer`
 
-* `Ports`：`signalingPort`、`stunPort`、`stunAlternatePort`、`relayPort`
+* `Ports`：`signalingPort`、`stunPort`、`stunAlternatePort`、`relayPort`、`webSocketPort`
 * `Relay`：`maxRelaySessions`、`relayTimeoutMs`
 * `Security`：`requireRegistrationToken`、`registrationTokens`
 * `Metrics`：`metricsReportIntervalSeconds`
@@ -308,7 +315,10 @@ dotnet run --project src/LanBridge.ExtranetPeer -- \
   "transport": {
     "udpPort": 0,
     "verbose": false,
-    "enableKcpCongestionControl": false
+    "enableKcpCongestionControl": false,
+    "enableTui": false,
+    "signalingTransport": "tcp",
+    "signalingWsPort": 9010
   },
   "allowedTargets": [
     {
@@ -352,7 +362,9 @@ dotnet run --project src/LanBridge.ExtranetPeer -- \
     "udpPort": 0,
     "verbose": false,
     "enableKcpCongestionControl": false,
-    "enableTui": false
+    "enableTui": false,
+    "signalingTransport": "tcp",
+    "signalingWsPort": 9010
   },
   "mappings": [
     {
@@ -394,7 +406,8 @@ dotnet run --project src/LanBridge.ExtranetPeer -- \
     "signalingPort": 9000,
     "stunPort": 9001,
     "stunAlternatePort": 9003,
-    "relayPort": 9002
+    "relayPort": 9002,
+    "webSocketPort": 9010
   },
   "relay": {
     "maxSessions": 100,
@@ -470,19 +483,17 @@ dotnet build LanBridge.slnx -c Debug
 
 ---
 
-## 🌐 WebSocket 信令传输 *(开发中)*
+## 🌐 WebSocket 信令传输
 
-> **状态**：客户端 `WebSocketSignalingClient`、服务端 `WebSocketSignalingService` 及 `SignalingConnectionLoop` 的多传输支持代码已实现。当前尚无 CLI 参数暴露（`--signaling-transport`）、服务端未自动启动 WebSocket 监听、配置文件无 `wsPort` 字段。以下为完成后的预期用法，供参考。
-
-除了传统的 TCP 信令连接外，LanBridge 将支持通过 **WebSocket** 与信令服务器通信。这在以下场景特别有用：
+除了传统的 TCP 信令连接外，LanBridge 也支持通过 **WebSocket** 与信令服务器通信。这在以下场景特别有用：
 
 * 出站流量受限于 HTTP 代理 / 企业防火墙，仅允许 WebSocket 连接
 * 需要 TLS 加密信令通信（通过反向代理如 Nginx/Caddy 提供 WSS 终结）
 * 与 Web 前端集成
 
-### 预期使用方式
+### 使用方式
 
-信令服务器端默认同时启动 TCP 信令服务（端口 9000），WebSocket 信令服务需要额外配置端口（默认 9010）。
+信令服务器端默认启动 TCP 信令服务（端口 9000）；如果额外配置 `webSocketPort` 或 `--ws-port`，则会同时启动 WebSocket 信令服务，常用端口为 `9010`。
 
 客户端通过 `--signaling-transport` 参数选择传输模式：
 
@@ -493,10 +504,11 @@ dotnet build LanBridge.slnx -c Debug
 | `auto` | 先尝试 TCP，失败后自动回退到 WebSocket |
 
 ```bash
-# 使用 WebSocket 信令（功能完成后）
+# 使用 WebSocket 信令
 dotnet run --project src/LanBridge.ExtranetPeer -- \
   --signaling-host lanbridge.yourdomain.com \
   --signaling-transport ws \
+  --ws-port 9010 \
   --target-node intranet-peer-001 \
   -m 8554=192.168.7.230:554
 
@@ -504,12 +516,13 @@ dotnet run --project src/LanBridge.ExtranetPeer -- \
 dotnet run --project src/LanBridge.ExtranetPeer -- \
   --signaling-host lanbridge.yourdomain.com \
   --signaling-transport auto \
+  --ws-port 9010 \
   --target-node intranet-peer-001 \
   -m 8554=192.168.7.230:554
 ```
 
 > [!NOTE]
-> WebSocket 信令仅影响信令通道（注册、打洞协调），数据传输仍通过 P2P UDP（KCP）或 TCP Relay 进行。
+> WebSocket 信令仅影响信令通道（注册、打洞协调），数据传输仍通过 P2P UDP（KCP）或 TCP Relay 进行。服务端只有在 `webSocketPort` / `--ws-port` 大于 `0` 时才会启动 WS 监听。
 
 ---
 
@@ -537,6 +550,7 @@ dotnet run --project src/LanBridge.ExtranetPeer -- \
 | `--stun-port` | `-stun` | STUN 服务端口 | `9001` |
 | `--stun-alt-port` | — | STUN 辅助端口 | `9003` |
 | `--relay-port` | `-rp` | 中继端口 | `9002` |
+| `--ws-port` | `-wsp` | WebSocket 信令端口，`0` 表示关闭 | `0` |
 | `--relay-timeout` | — | 中继空闲超时 (ms) | `30000` |
 | `--require-token` | — | 启用注册令牌保护 | `false` |
 | `--registration-token` | — | 允许的注册令牌（可重复） | — |
@@ -546,6 +560,7 @@ dotnet run --project src/LanBridge.ExtranetPeer -- \
 
 ```bash
 dotnet run --project src/LanBridge.SignalingServer -- \
+  --ws-port 9010 \
   --require-token \
   --registration-token lanbridge-prod-token \
   --metrics-interval 30 \
@@ -560,6 +575,7 @@ dotnet run --project src/LanBridge.SignalingServer -- \
   "stunPort": 9001,
   "stunAlternatePort": 9003,
   "relayPort": 9002,
+  "webSocketPort": 9010,
   "maxRelaySessions": 100,
   "relayTimeoutMs": 30000,
   "requireRegistrationToken": true,
@@ -609,11 +625,9 @@ dotnet run --project src/LanBridge.ExtranetPeer -- \
 
 内部通过 `TunnelRouter` 管理多个 `ConnectionNegotiator` 实例，共享单一 UDP 栈和信令连接栈，高效利用资源。
 
-### 6. 带宽限速与 QoS 优先级 *(开发中)*
+### 6. 带宽限速与 QoS 优先级
 
-> **状态**：数据模型（`TunnelMapping.RateLimitBytesPerSec`/`Priority`）、令牌桶（`TokenBucket`）、优先级队列（`PriorityFrameQueue`）和 `PeerTransportSession.SetRateLimit`/`SetPriority` API 已实现。当前运行时尚未接入（`SetRateLimit`/`SetPriority` 未被调用），仅可通过 JSON 配置文件设置但不会生效。以下为完成后的预期用法。
-
-通过 JSON 配置文件可以为每个端口映射独立设置带宽限速和 QoS 优先级：
+可通过 JSON 配置文件或 CLI 为每个端口映射设置带宽限速和 QoS 优先级：
 
 ```json
 {
@@ -627,14 +641,24 @@ dotnet run --project src/LanBridge.ExtranetPeer -- \
 ```
 
 * `rateLimitBytesPerSec`：每秒最大传输字节数，`0` 表示不限速（默认）
-* `priority`：QoS 优先级，影响发送队列顺序
-  * `high`：优先发送（适用于实时音视频、游戏）
-  * `normal`：默认优先级（适用于 HTTP、文件传输）
-  * `low`：最后发送（适用于后台同步等低优先级流量）
-  * 不设置时按协议自动推导：UDP = `high`，TCP = `normal`
+* `priority`：QoS 优先级，影响发送队列顺序；`high` 适合实时音视频和游戏，`normal` 适合 HTTP 与文件传输，`low` 适合后台同步。不设置时按协议自动推导：UDP = `high`，TCP = `normal`
+
+CLI 写法示例：
+
+```bash
+dotnet run --project src/LanBridge.ExtranetPeer -- \
+  --signaling-host lanbridge.yourdomain.com \
+  --target-node intranet-peer-001 \
+  -m 8554=192.168.7.230:554:tcp \
+  --rate-limit 1048576 \
+  --priority high
+```
+
+> [!NOTE]
+> 当前 QoS/限速按目标节点聚合后应用到实际传输会话：同一 `targetNodeId` 下若配置了多条映射，会取最严格的非零限速和最高优先级。
 
 ### 7. TUI 实时统计仪表盘
-ExtranetPeer 支持 `--tui` 或 `--dashboard` 启动参数，在终端中实时展示连接状态和性能指标：
+ExtranetPeer 支持 `--tui` 或 `--dashboard`，IntranetPeer 支持 `--tui`，都会在终端中实时展示连接状态和性能指标：
 
 ```bash
 dotnet run --project src/LanBridge.ExtranetPeer -- \

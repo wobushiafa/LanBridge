@@ -23,7 +23,9 @@
     "udpPort": 0,
     "verbose": false,
     "enableKcpCongestionControl": false,
-    "enableTui": false
+    "enableTui": false,
+    "signalingTransport": "tcp",
+    "signalingWsPort": 9010
   },
   "mappings": [
     {
@@ -48,7 +50,9 @@
       "localPort": 9999,
       "targetHost": "192.168.7.230",
       "targetPort": 9999,
-      "protocol": "udp"
+      "protocol": "udp",
+      "rateLimitBytesPerSec": 1048576,
+      "priority": "high"
     }
   ]
 }

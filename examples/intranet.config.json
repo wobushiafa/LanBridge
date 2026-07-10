@@ -19,7 +19,10 @@
   "transport": {
     "udpPort": 0,
     "verbose": false,
-    "enableKcpCongestionControl": false
+    "enableKcpCongestionControl": false,
+    "enableTui": false,
+    "signalingTransport": "tcp",
+    "signalingWsPort": 9010
   },
   "allowedTargets": [
     {

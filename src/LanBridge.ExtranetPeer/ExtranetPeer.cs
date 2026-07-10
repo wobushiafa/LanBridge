@@ -56,6 +56,11 @@ public class ClientConfig
         ConfigValidation.EnsurePort(Stun.Port, nameof(Stun.Port));
         ConfigValidation.EnsurePort(Stun.AlternatePort, nameof(Stun.AlternatePort));
         ConfigValidation.EnsurePositive(Connection.HolePunchTimeoutMs, nameof(Connection.HolePunchTimeoutMs));
+        ConfigValidation.EnsureWebSocketPortForTransport(
+            Transport.SignalingTransport,
+            Transport.SignalingWsPort,
+            nameof(Transport.SignalingTransport),
+            nameof(Transport.SignalingWsPort));
 
         foreach (var mapping in Mappings)
         {

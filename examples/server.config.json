@@ -3,7 +3,8 @@
     "signalingPort": 9000,
     "stunPort": 9001,
     "stunAlternatePort": 9003,
-    "relayPort": 9002
+    "relayPort": 9002,
+    "webSocketPort": 9010
   },
   "relay": {
     "maxSessions": 100,

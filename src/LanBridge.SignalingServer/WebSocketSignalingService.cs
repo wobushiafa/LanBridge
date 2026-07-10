@@ -176,10 +176,11 @@ public sealed class WebSocketSignalingService : IDisposable
         {
             try
             {
-                if (ws.State == WebSocketState.Open)
+                if (ws.State is WebSocketState.Open or WebSocketState.CloseReceived or WebSocketState.CloseSent)
                 {
-                    ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "Disposing", CancellationToken.None).GetAwaiter().GetResult();
+                    ws.Abort();
                 }
+
                 ws.Dispose();
             }
             catch

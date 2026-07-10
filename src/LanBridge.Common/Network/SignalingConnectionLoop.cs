@@ -1,3 +1,5 @@
+using LanBridge.Common.Configuration;
+
 namespace LanBridge.Common.Network;
 
 /// <summary>
@@ -47,7 +49,12 @@ public sealed class SignalingConnectionLoop : IDisposable
         _onDisconnected = onDisconnected;
         _onMessageAsync = onMessageAsync;
         _onConnectedAsync = onConnectedAsync;
-        _transportType = transportType;
+        ConfigValidation.EnsureWebSocketPortForTransport(
+            transportType,
+            wsPort,
+            nameof(transportType),
+            nameof(wsPort));
+        _transportType = transportType.ToLowerInvariant();
         _wsPort = wsPort;
     }
 

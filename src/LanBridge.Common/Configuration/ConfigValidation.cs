@@ -46,6 +46,34 @@ public static class ConfigValidation
         }
     }
 
+    public static void EnsureSupportedSignalingTransport(string? transport, string fieldName)
+    {
+        if (!string.Equals(transport, "tcp", StringComparison.OrdinalIgnoreCase) &&
+            !string.Equals(transport, "ws", StringComparison.OrdinalIgnoreCase) &&
+            !string.Equals(transport, "auto", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException($"{fieldName} must be tcp, ws, or auto.");
+        }
+    }
+
+    public static void EnsureWebSocketPortForTransport(string? transport, int wsPort, string transportFieldName, string wsPortFieldName)
+    {
+        EnsureSupportedSignalingTransport(transport, transportFieldName);
+
+        if ((string.Equals(transport, "ws", StringComparison.OrdinalIgnoreCase) ||
+             string.Equals(transport, "auto", StringComparison.OrdinalIgnoreCase)) &&
+            (wsPort < 1 || wsPort > 65535))
+        {
+            throw new InvalidOperationException(
+                $"{wsPortFieldName} must be between 1 and 65535 when {transportFieldName} is ws or auto.");
+        }
+
+        if (wsPort != 0)
+        {
+            EnsurePort(wsPort, wsPortFieldName);
+        }
+    }
+
     public static void EnsureCidr(string cidr, string fieldName)
     {
         if (!CidrMatcher.TryParseCidr(cidr, out _))

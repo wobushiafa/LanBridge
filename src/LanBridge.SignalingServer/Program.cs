@@ -147,8 +147,7 @@ public class Program
 
                 case "--ws-port":
                 case "-wsp":
-                    if (i + 1 < args.Length && int.TryParse(args[++i], out int wsp))
-                        _config.WebSocketPort = wsp;
+                    _config.WebSocketPort = ReadIntArgument(args, ref i, args[i]);
                     break;
 
                 case "--relay-timeout":
@@ -214,6 +213,22 @@ public class Program
         Console.WriteLine("  --metrics-interval <sec>       Metrics reporting interval in seconds (default: 30)");
         Console.WriteLine("  --config, -c <path>            Load JSON config file");
         Console.WriteLine("  --help, -h                     Show this help");
+    }
+
+    private static int ReadIntArgument(string[] args, ref int index, string optionName)
+    {
+        if (index + 1 >= args.Length)
+        {
+            throw new InvalidOperationException($"{optionName} requires a value.");
+        }
+
+        var value = args[++index];
+        if (!int.TryParse(value, out var parsed))
+        {
+            throw new InvalidOperationException($"{optionName} must be an integer.");
+        }
+
+        return parsed;
     }
 }
 

@@ -55,6 +55,11 @@ public class PeerConfig
         ConfigValidation.EnsurePort(Stun.Port, nameof(Stun.Port));
         ConfigValidation.EnsurePort(Stun.AlternatePort, nameof(Stun.AlternatePort));
         ConfigValidation.EnsurePort(Target.Port, nameof(Target.Port));
+        ConfigValidation.EnsureWebSocketPortForTransport(
+            Transport.SignalingTransport,
+            Transport.SignalingWsPort,
+            nameof(Transport.SignalingTransport),
+            nameof(Transport.SignalingWsPort));
 
         foreach (var target in AllowedTargets)
         {

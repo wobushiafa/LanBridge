@@ -211,13 +211,11 @@ public class Program
                     break;
 
                 case "--signaling-transport":
-                    if (i + 1 < args.Length)
-                        config.SignalingTransport = args[++i];
+                    config.SignalingTransport = ReadValidatedSignalingTransport(args, ref i, "--signaling-transport");
                     break;
 
                 case "--ws-port":
-                    if (i + 1 < args.Length && int.TryParse(args[++i], out int wsPort))
-                        config.SignalingWsPort = wsPort;
+                    config.SignalingWsPort = ReadIntArgument(args, ref i, "--ws-port");
                     break;
 
                 case "--verbose":
@@ -314,6 +312,34 @@ public class Program
         Console.WriteLine("  --ws-port <port>                WebSocket signaling port (default: 9010)");
         Console.WriteLine("  --verbose, -v                   Enable detailed KCP diagnostics");
         Console.WriteLine("  --help, -h                      Show this help");
+    }
+
+    private static string ReadValidatedSignalingTransport(string[] args, ref int index, string optionName)
+    {
+        var value = ReadRequiredValue(args, ref index, optionName);
+        ConfigValidation.EnsureSupportedSignalingTransport(value, optionName);
+        return value.ToLowerInvariant();
+    }
+
+    private static int ReadIntArgument(string[] args, ref int index, string optionName)
+    {
+        var value = ReadRequiredValue(args, ref index, optionName);
+        if (!int.TryParse(value, out var parsed))
+        {
+            throw new InvalidOperationException($"{optionName} must be an integer.");
+        }
+
+        return parsed;
+    }
+
+    private static string ReadRequiredValue(string[] args, ref int index, string optionName)
+    {
+        if (index + 1 >= args.Length)
+        {
+            throw new InvalidOperationException($"{optionName} requires a value.");
+        }
+
+        return args[++index];
     }
 }
 
