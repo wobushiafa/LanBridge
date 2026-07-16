@@ -31,6 +31,8 @@ public sealed record PeerConnectionOptions
     public int SignalingWsPort { get; init; } = 9010;
     public long RateLimitBytesPerSec { get; init; }
     public FramePriority Priority { get; init; } = FramePriority.Normal;
+    public bool EnablePortMapping { get; init; } = false;
+    public int ExternalPort { get; init; } = 0;
 }
 
 public sealed class ConnectionNegotiator : IDisposable, ISignalingHandler, ILanDiscoveryHost

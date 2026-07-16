@@ -42,6 +42,8 @@ public class PeerConfig
     public bool EnableKcpCongestionControl { get => Transport.EnableKcpCongestionControl; set => Transport.EnableKcpCongestionControl = value; }
     public string SignalingTransport { get => Transport.SignalingTransport; set => Transport.SignalingTransport = value; }
     public int SignalingWsPort { get => Transport.SignalingWsPort; set => Transport.SignalingWsPort = value; }
+    public bool EnablePortMapping { get => Transport.EnablePortMapping; set => Transport.EnablePortMapping = value; }
+    public int ExternalPort { get => Transport.ExternalPort; set => Transport.ExternalPort = value; }
     public List<TargetEndpoint> AllowedTargets { get; set; } = new();
     public List<AllowedSubnet> AllowedSubnets { get; set; } = new();
 
@@ -180,7 +182,9 @@ public class IntranetPeer : IDisposable
             Verbose = _config.Transport.Verbose,
             EnableKcpCongestionControl = _config.Transport.EnableKcpCongestionControl,
             SignalingTransport = _config.Transport.SignalingTransport,
-            SignalingWsPort = _config.Transport.SignalingWsPort
+            SignalingWsPort = _config.Transport.SignalingWsPort,
+            EnablePortMapping = _config.Transport.EnablePortMapping,
+            ExternalPort = _config.Transport.ExternalPort
         });
         _connection.OnStatusChanged += status => OnStatusChanged?.Invoke(status);
         _connection.OnSessionDataReceived += (sessionId, data, length) => _ = HandleTunnelFrameAsync(sessionId, data, length);

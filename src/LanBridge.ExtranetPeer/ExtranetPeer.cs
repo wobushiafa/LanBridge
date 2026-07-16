@@ -45,6 +45,8 @@ public class ClientConfig
     public bool EnableKcpCongestionControl { get => Transport.EnableKcpCongestionControl; set => Transport.EnableKcpCongestionControl = value; }
     public string SignalingTransport { get => Transport.SignalingTransport; set => Transport.SignalingTransport = value; }
     public int SignalingWsPort { get => Transport.SignalingWsPort; set => Transport.SignalingWsPort = value; }
+    public bool EnablePortMapping { get => Transport.EnablePortMapping; set => Transport.EnablePortMapping = value; }
+    public int ExternalPort { get => Transport.ExternalPort; set => Transport.ExternalPort = value; }
     public List<TunnelMapping> Mappings { get; set; } = new();
 
     public void Validate()
@@ -251,7 +253,9 @@ public class ExtranetPeer : IDisposable
             Verbose = _config.Transport.Verbose,
             EnableKcpCongestionControl = _config.Transport.EnableKcpCongestionControl,
             SignalingTransport = _config.Transport.SignalingTransport,
-            SignalingWsPort = _config.Transport.SignalingWsPort
+            SignalingWsPort = _config.Transport.SignalingWsPort,
+            EnablePortMapping = _config.Transport.EnablePortMapping,
+            ExternalPort = _config.Transport.ExternalPort
         };
 
         _router = new TunnelRouter(baseOptions, routingTable, _config.Connection.TargetNodeId, nodeQos);

@@ -27,6 +27,8 @@ public sealed class TransportOptions
     public bool EnableTui { get; set; }
     public string SignalingTransport { get; set; } = "tcp";
     public int SignalingWsPort { get; set; } = 9010;
+    public bool EnablePortMapping { get; set; }
+    public int ExternalPort { get; set; }
 }
 
 public sealed class ExtranetConnectionOptions

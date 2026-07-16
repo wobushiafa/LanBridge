@@ -16,6 +16,7 @@ public sealed class SharedUdpStack : IDisposable
     private LanDiscoveryService? _lanDiscovery;
     private NatDetectionResult? _natDetection;
     private bool _natDetected;
+    private Nat.NatMappingManager? _natMapper;
 
     public UdpHolePuncher HolePuncher => _holePuncher;
     public LanDiscoveryService? LanDiscovery => _lanDiscovery;
@@ -46,6 +47,21 @@ public sealed class SharedUdpStack : IDisposable
         PublicEndPoint = snapshot.PublicEndPoint;
         PublicEndPointV6 = snapshot.PublicEndPointV6;
         _natDetected = true;
+
+        if (_options.EnablePortMapping)
+        {
+            var localPort = _holePuncher.LocalEndPoint?.Port ?? 0;
+            if (localPort > 0)
+            {
+                _natMapper = new Nat.NatMappingManager();
+                int mappedPort = await _natMapper.StartMappingAsync(localPort, _options.ExternalPort);
+                if (mappedPort > 0)
+                {
+                    var extIp = _natMapper.ExternalIp ?? PublicEndPoint?.Address ?? IPAddress.Loopback;
+                    PublicEndPoint = new IPEndPoint(extIp, mappedPort);
+                }
+            }
+        }
     }
 
     /// <summary>
@@ -65,6 +81,7 @@ public sealed class SharedUdpStack : IDisposable
     public void Dispose()
     {
         _lanDiscovery?.Dispose();
+        _natMapper?.Dispose();
         _holePuncher.Dispose();
     }
 }

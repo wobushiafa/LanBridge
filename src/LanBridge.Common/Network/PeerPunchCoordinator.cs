@@ -2,6 +2,7 @@ using System.Net;
 using System.Text;
 using System.Collections.Concurrent;
 using LanBridge.Common.Protocol;
+using LanBridge.Common.Network.Nat;
 
 namespace LanBridge.Common.Network;
 
@@ -38,6 +39,7 @@ public sealed class PeerPunchCoordinator : IDisposable
     private volatile bool _isHolePunching;
     private bool _isNatKeepAliveRunning;
     private bool _ownsHolePuncher;
+    private NatMappingManager? _natMapper;
 
     // Events OUT (forwarded to control/data plane by ConnectionNegotiator)
     public event Action<string>? OnStatusChanged;
@@ -115,6 +117,22 @@ public sealed class PeerPunchCoordinator : IDisposable
             ConfigureHolePuncherEvents();
             await DetectNatAsync();
             _ownsHolePuncher = true;
+
+            if (_options.EnablePortMapping)
+            {
+                var localPort = _holePuncher.LocalEndPoint?.Port ?? 0;
+                if (localPort > 0)
+                {
+                    _natMapper = new NatMappingManager();
+                    _natMapper.OnLog += status => OnStatusChanged?.Invoke(status);
+                    int mappedPort = await _natMapper.StartMappingAsync(localPort, _options.ExternalPort);
+                    if (mappedPort > 0)
+                    {
+                        var extIp = _natMapper.ExternalIp ?? _publicEndPoint?.Address ?? IPAddress.Loopback;
+                        _publicEndPoint = new IPEndPoint(extIp, mappedPort);
+                    }
+                }
+            }
         }
     }
 
@@ -460,6 +478,7 @@ public sealed class PeerPunchCoordinator : IDisposable
     {
         _relayProbeCts?.Cancel();
         _relayProbeCts?.Dispose();
+        _natMapper?.Dispose();
         if (_ownsHolePuncher)
         {
             _holePuncher?.Dispose();

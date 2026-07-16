@@ -28,6 +28,7 @@ public class Program
             ("Allowed Subnets", string.Join(", ", config.AllowedSubnets)),
             ("Signaling Transport", config.Transport.SignalingTransport),
             ("WebSocket Port", config.Transport.SignalingWsPort.ToString()),
+            ("Port Mapping (UPnP)", config.Transport.EnablePortMapping ? $"enabled (external port: {config.Transport.ExternalPort})" : "disabled"),
             ("Verbose", config.Transport.Verbose ? "enabled" : "disabled")
         });
         
@@ -171,6 +172,17 @@ public class Program
 
                 case "--tui":
                     config.Transport.EnableTui = true;
+                    break;
+
+                case "--enable-port-mapping":
+                case "--enable-upnp":
+                    config.EnablePortMapping = true;
+                    break;
+
+                case "--external-port":
+                case "-ep":
+                    if (i + 1 < args.Length && int.TryParse(args[++i], out int ep))
+                        config.ExternalPort = ep;
                     break;
 
                 case "--help":
@@ -320,6 +332,8 @@ public class Program
         Console.WriteLine("  --udp-port, -up <port>          UDP port for P2P (default: random)");
         Console.WriteLine("  --signaling-transport <tcp|ws|auto> Signaling transport (default: tcp)");
         Console.WriteLine("  --ws-port <port>                WebSocket signaling port (default: 9010)");
+        Console.WriteLine("  --enable-port-mapping, --enable-upnp Enable UPnP/NAT-PMP port mapping");
+        Console.WriteLine("  --external-port, -ep <port>     Desired external port for mapping (default: 0 / auto)");
         Console.WriteLine("  --verbose, -v                   Enable detailed KCP diagnostics");
         Console.WriteLine("  --tui                           Enable real-time TUI dashboard");
         Console.WriteLine("  --help, -h                      Show this help");
